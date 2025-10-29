@@ -1,10 +1,11 @@
-from fastapi import FastAPI, UploadFile, File, Depends
+from fastapi import FastAPI, UploadFile, File, Depends, HTTPException
 from sqlalchemy.orm import Session
 import os
 import shutil
 
 from .database import db_engine, get_db, Base
 from .model import Image, User
+from .analysis import measure_wound, estimated_centimetres, ASSUMED_PIXELS_PER_CM
 
 app = FastAPI()
 
@@ -33,6 +34,12 @@ async def upload_image(
         file_type = image.content_type,
         file_size = file_size #in bytes
     )
+
+    measurements = measure_wound(file_path)
+    if measurements:
+        new_image.wound_area_px = measurements.get("wound_area_px")
+        new_image.wound_width_px = measurements.get("wound_width_px")
+        new_image.wound_height_px = measurements.get("wound_height_px")
     
     db.add(new_image)
     db.commit()
@@ -43,7 +50,31 @@ async def upload_image(
         "filename": image.filename,
         "file_path": file_path,
         "file_type" : image.content_type,
-        "file_size": file_size
+        "file_size": file_size,
+        "assumed_pixels_per_cm": ASSUMED_PIXELS_PER_CM,
+        "measurements": measurements
+    }
+
+
+@app.get("/images/{image_id}")
+def get_image(image_id: int, db: Session = Depends(get_db)):
+    image = db.get(Image, image_id)
+    if image is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+
+    cm_metrics = estimated_centimetres(image.wound_area_px, image.wound_width_px, image.wound_height_px)
+
+    return {
+        "image_id": image.image_id,
+        "file_name": image.file_name,
+        "file_type": image.file_type,
+        "file_size": image.file_size,
+        "time_stamp": image.time_stamp.isoformat() if image.time_stamp else None,
+        "wound_area_px": image.wound_area_px,
+        "wound_width_px": image.wound_width_px,
+        "wound_height_px": image.wound_height_px,
+        "assumed_pixels_per_cm": ASSUMED_PIXELS_PER_CM,
+        "estimated_measurements": cm_metrics,
     }
 
 #uncomment below to see if database updates when you upload images

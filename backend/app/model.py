@@ -13,6 +13,9 @@ class Image(Base): #stores image name and file paths
     file_type = Column(String)
     file_size = Column(Integer, nullable=False)
     time_stamp = Column(DateTime(timezone=True), server_default=func.now()) #update row with time stamp when updated
+    wound_area_px = Column(Integer)
+    wound_width_px = Column(Integer)
+    wound_height_px = Column(Integer)
     
     #could add session id to group photos together
     #
