@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { setUser } from "@/lib/auth";
+import { useAuth } from "@/app/providers/AuthProvider";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Mail, Lock, User as UserIcon } from "lucide-react";
@@ -14,12 +15,22 @@ export default function Login() {
   const [username, setUsername] = useState("");
   const [pw, setPw] = useState("");
   const router = useRouter();
+  const { signIn } = useAuth();
 
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!email || !username) return alert("Enter email and username");
-    setUser({ email, username });
-    router.replace("/dashboard");
+    if (!pw) return alert("Enter password");
+    // Try to sign in via Firebase, then mirror to local storage for existing UI
+    signIn(email, pw)
+      .then(() => {
+        setUser({ email, username });
+        router.replace("/dashboard");
+      })
+      .catch((err) => {
+        console.error(err);
+        alert("Sign in failed: " + (err?.message ?? err));
+      });
   }
 
   return (

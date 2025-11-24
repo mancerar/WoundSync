@@ -2,6 +2,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { setUser } from "@/lib/auth";
+import { useAuth } from "@/app/providers/AuthProvider";
 import Link from "next/link";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -12,13 +13,22 @@ export default function Signup() {
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
   const router = useRouter();
+  const { signUp } = useAuth();
 
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!username || !email || pw.length < 8)
       return alert("Enter username, email & 8+ char password");
-    setUser({ email, username });
-    router.replace("/dashboard");
+    // Create account in Firebase then mirror to local storage
+    signUp(email, pw)
+      .then(() => {
+        setUser({ email, username });
+        router.replace("/dashboard");
+      })
+      .catch((err) => {
+        console.error(err);
+        alert("Sign up failed: " + (err?.message ?? err));
+      });
   }
 
   return (

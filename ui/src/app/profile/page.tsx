@@ -11,14 +11,14 @@ export default function Profile() {
   const router = useRouter();
 
   useEffect(() => {
-    const u = getUser();
-    if (!u) {
-      router.replace("/");
-      return;
-    }
-    setEmail(u.email);
-    setUsername(u.username || "");
-  }, [router]);
+      const u = getUser();
+      if (!u) {
+        router.replace("/");
+        return;
+      }
+      setEmail(u.email);
+      setUsername(u.username || "");
+    }, [router]);
 
   function exportData() {
     const blob = new Blob(
@@ -33,11 +33,50 @@ export default function Profile() {
     URL.revokeObjectURL(url);
   }
 
-  function deleteAll() {
+  async function deleteAll() {
     if (!confirm("Delete account & all data on this device?")) return;
-    clearProgress();
-    clearUser();
-    router.replace("/");
+    
+    try {
+      // dynamic import firebase auth helpers
+      const { auth } = await import("@/firebase/firebase");
+      const current = auth.currentUser;
+      if (current) {
+        try {
+          await current.delete();
+        } catch (err: any) {
+          
+          const code = err?.code;
+          if (code === "auth/requires-recent-login" || code === "auth/invalid-credential") {
+            const pw = prompt("Please re-enter your password to confirm account deletion:");
+            if (!pw) return;
+            try {
+              const { EmailAuthProvider, reauthenticateWithCredential } = await import("firebase/auth");
+              const credential = EmailAuthProvider.credential(current.email || email, pw);
+              await reauthenticateWithCredential(current, credential);
+              
+              await current.delete();
+            } catch (reauthErr: any) {
+              console.error("Reauthentication failed", reauthErr);
+              alert("Reauthentication failed: " + (reauthErr?.message ?? reauthErr));
+              return;
+            }
+          } else {
+            console.error("Account deletion failed", err);
+            alert("Account deletion failed: " + (err?.message ?? err));
+            return;
+          }
+        }
+      }
+
+      
+      clearProgress();
+      clearUser();
+      router.replace("/");
+    } catch (e) {
+      console.error("deleteAll unexpected error", e);
+      const msg = (e as any)?.message ?? String(e);
+      alert("Failed to delete account: " + msg);
+    }
   }
 
   function logout() {
