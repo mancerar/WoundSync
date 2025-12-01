@@ -5,19 +5,49 @@ import { addProgress } from "@/lib/progress";
 
 export default function Capture() {
   const [preview, setPreview] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [note, setNote] = useState("");
+  const [uploading, setUploading] = useState(false);
+  const [result, setResult] = useState<any>(null);
 
   async function onUpload() {
-    if (!preview) return alert("Please take or select a photo first.");
-    addProgress({
-      id: crypto.randomUUID(),
-      date: new Date().toISOString(),
-      note,
-      percentChange: undefined,
-      imageUrl: preview,
-    });
-    alert("Saved to Progress Timeline.");
-    window.location.href = "/progress";
+    if (!selectedFile) {
+      return alert("Please take or select a photo first.");
+    }
+    setUploading(true);
+    setResult(null);
+
+    const form = new FormData();
+    form.append("file", selectedFile);
+    form.append("user_id", "some-user-id"); 
+    
+
+    try {
+      const [predictRes, uploadRes] = await Promise.all([
+        fetch("http://localhost:8000/predict", { method: "POST", body: form }),
+        fetch("http://localhost:8000/upload-image-rest", { method: "POST", body: form }),
+      ]);
+
+      if (!predictRes.ok) 
+        throw new Error(await predictRes.text());
+
+      if (!uploadRes.ok) 
+        throw new Error(await uploadRes.text());
+
+      const predictData = await predictRes.json();
+      const uploadData = await uploadRes.json();
+      setResult({
+        predict: predictData,
+        upload: uploadData,
+     });
+
+
+    
+    } catch (e: any) {
+      alert("Upload failed: " + (e?.message ?? e));
+    } finally {
+      setUploading(false);
+    }
   }
 
   return (
@@ -59,7 +89,10 @@ export default function Capture() {
             className="hidden"
             onChange={(e) => {
               const f = e.target.files?.[0];
-              if (f) setPreview(URL.createObjectURL(f));
+              if (f) {
+                setPreview(URL.createObjectURL(f));
+                setSelectedFile(f); 
+              }
             }}
           />
           <Button className="h-12 w-full rounded-xl" asChild>
@@ -92,6 +125,24 @@ export default function Capture() {
       >
         Upload
       </Button>
+    
+    
+      {result && (
+        <div className="w-full mt-6 bg-slate-100 p-4 rounded break-all">
+          <strong>Analysis Result:</strong>
+          <pre className="mt-2">{JSON.stringify(result, null, 2)}</pre>
+
+          {result?.predict?.annotated_image_url && (
+            <img
+              src={result?.predict?.annotated_image_url}
+              alt="Annotated"
+              className="mt-4 rounded-xl border"
+            />
+          )}
+        </div>
+      )}
+
+      
     </div>
   );
 }
