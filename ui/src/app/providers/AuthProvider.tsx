@@ -1,57 +1,92 @@
-'use client';
-import React, { createContext, useContext, useEffect, useState } from 'react';
+"use client";
+
+import React, { createContext, useContext, useEffect, useMemo, useState } from "react";
+import type { ReactNode } from "react";
+
+// If your firebase.ts exports `auth` even when not configured, keep this import.
+// If it exports `auth` as null when missing env vars, this code handles that too.
+import { auth } from "@/firebase/firebase";
+
 import {
   onAuthStateChanged,
-  createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
-  signOut as firebaseSignOut,
-  User as FirebaseUser,
-} from 'firebase/auth';
-import { auth } from '../../firebase/firebase';
+  createUserWithEmailAndPassword,
+  signOut as fbSignOut,
+} from "firebase/auth";
+
+type AppUser = {
+  uid: string;
+  email: string | null;
+};
 
 type AuthContextType = {
-  user: FirebaseUser | null;
+  user: AppUser | null;
   loading: boolean;
-  signUp: (email: string, password: string) => Promise<void>;
   signIn: (email: string, password: string) => Promise<void>;
+  signUp: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
+  authEnabled: boolean;
 };
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [user, setUser] = useState<FirebaseUser | null>(null);
+export function useAuth() {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error("useAuth must be used within <AuthProvider />");
+  return ctx;
+}
+
+export default function AuthProvider({ children }: { children: ReactNode }) {
+  const authEnabled = !!auth;
+
+  const [user, setUser] = useState<AppUser | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsub = onAuthStateChanged(auth, (u) => {
-      setUser(u);
+    // If Firebase isn’t configured, don’t crash the whole app.
+    if (!authEnabled) {
+      console.warn("Firebase env vars missing; auth will be disabled for local dev.");
+      setLoading(false);
+      return;
+    }
+
+    const unsub = onAuthStateChanged(auth!, (u) => {
+      if (!u) setUser(null);
+      else setUser({ uid: u.uid, email: u.email });
       setLoading(false);
     });
+
     return () => unsub();
-  }, []);
+  }, [authEnabled]);
 
-  const signUp = async (email: string, password: string) => {
-    await createUserWithEmailAndPassword(auth, email, password);
-  };
+  const value = useMemo<AuthContextType>(() => {
+    const signIn = async (email: string, password: string) => {
+      if (!authEnabled) {
+        // Local-dev fallback so UI doesn’t explode
+        setUser({ uid: "local-dev", email });
+        return;
+      }
+      await signInWithEmailAndPassword(auth!, email, password);
+    };
 
-  const signIn = async (email: string, password: string) => {
-    await signInWithEmailAndPassword(auth, email, password);
-  };
+    const signUp = async (email: string, password: string) => {
+      if (!authEnabled) {
+        setUser({ uid: "local-dev", email });
+        return;
+      }
+      await createUserWithEmailAndPassword(auth!, email, password);
+    };
 
-  const signOut = async () => {
-    await firebaseSignOut(auth);
-  };
+    const signOut = async () => {
+      if (!authEnabled) {
+        setUser(null);
+        return;
+      }
+      await fbSignOut(auth!);
+    };
 
-  return (
-    <AuthContext.Provider value={{ user, loading, signUp, signIn, signOut }}>
-      {children}
-    </AuthContext.Provider>
-  );
-};
+    return { user, loading, signIn, signUp, signOut, authEnabled };
+  }, [user, loading, authEnabled]);
 
-export function useAuth() {
-  const ctx = useContext(AuthContext);
-  if (!ctx) throw new Error('useAuth must be used within AuthProvider');
-  return ctx;
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

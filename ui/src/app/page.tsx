@@ -63,7 +63,7 @@ export default function Login() {
         visits.
       </p>
 
-      {/* Log in Title (left-aligned, smaller font) */}
+      {/* Log in */}
       <h2 className="mt-5 text-xl font-semibold text-slate-800">
         Log in
       </h2>
