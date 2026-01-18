@@ -12,18 +12,19 @@ type PredictResponse = {
     summary: string;
     urgency: "home" | "soon" | "urgent";
     wound_type: "cut" | "scrape" | "uncertain";
-    photo_note?: string;
-    why_flagged?: string[];
     disclaimer: string;
     next_steps: string[];
     tips: string[];
     watch_for: string[];
-    signals?: any;
+    retake_tips?: string[];
+    quality?: any;
+    context?: any;
   };
   error?: string;
 };
 
-const BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
+const BACKEND_URL =
+  process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
 export default function CapturePage() {
   const [file, setFile] = useState<File | null>(null);
@@ -31,26 +32,19 @@ export default function CapturePage() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<PredictResponse | null>(null);
 
-  // Optional context (for realism)
-  const [bleedingNotStop, setBleedingNotStop] = useState(false);
-  const [biteDirty, setBiteDirty] = useState(false);
-  const [highRisk, setHighRisk] = useState(false);
-  const [numbWeak, setNumbWeak] = useState(false);
-  const [onHandFaceJoint, setOnHandFaceJoint] = useState(false);
-
   const urgencyLabel = useMemo(() => {
     const u = result?.assessment?.urgency;
     if (!u) return "";
-    if (u === "urgent") return "Urgent care recommended";
-    if (u === "soon") return "Get checked soon";
-    return "Home care";
+    if (u === "urgent") return "Urgent (get checked today if worried)";
+    if (u === "soon") return "Get checked soon (same/next day if worsening)";
+    return "Home care (monitor)";
   }, [result]);
 
-  const urgencyStyle = useMemo(() => {
+  const urgencyColor = useMemo(() => {
     const u = result?.assessment?.urgency;
-    if (u === "urgent") return { bg: "#fde8ea", border: "#f3b0b8", text: "#b4232c" };
-    if (u === "soon") return { bg: "#fff4e5", border: "#ffd59a", text: "#8a4b00" };
-    return { bg: "#e9f7ef", border: "#a7e1c1", text: "#116b3b" };
+    if (u === "urgent") return "#b00020";
+    if (u === "soon") return "#b36b00";
+    return "#1b6e1b";
   }, [result]);
 
   const onPickFile = (f: File | null) => {
@@ -73,15 +67,7 @@ export default function CapturePage() {
       const form = new FormData();
       form.append("image", file);
 
-      const params = new URLSearchParams();
-      params.set("debug", "false");
-      params.set("bleeding_not_stop", bleedingNotStop ? "true" : "false");
-      params.set("bite_dirty", biteDirty ? "true" : "false");
-      params.set("high_risk", highRisk ? "true" : "false");
-      params.set("numbness_weakness", numbWeak ? "true" : "false");
-      params.set("on_hand_face_joint", onHandFaceJoint ? "true" : "false");
-
-      const res = await fetch(`${BACKEND_URL}/predict?${params.toString()}`, {
+      const res = await fetch(`${BACKEND_URL}/predict?debug=false`, {
         method: "POST",
         body: form,
       });
@@ -99,17 +85,15 @@ export default function CapturePage() {
     setFile(null);
     setPreviewUrl("");
     setResult(null);
-
-    setBleedingNotStop(false);
-    setBiteDirty(false);
-    setHighRisk(false);
-    setNumbWeak(false);
-    setOnHandFaceJoint(false);
   };
 
   return (
     <div style={{ padding: 24, maxWidth: 1100, margin: "0 auto" }}>
-      <h2 style={{ marginBottom: 12 }}>Wound Check (Image Only)</h2>
+      <h2 style={{ marginBottom: 6 }}>Wound Check (Image Only)</h2>
+      <div style={{ color: "#666", marginBottom: 14 }}>
+        Upload a photo. Guidance is based on shape + visual cues (not “size in photo”),
+        so zoomed-in papercuts won’t automatically be treated as severe.
+      </div>
 
       <div
         style={{
@@ -119,7 +103,7 @@ export default function CapturePage() {
           padding: 16,
           border: "1px solid #ddd",
           borderRadius: 12,
-          marginBottom: 14,
+          marginBottom: 18,
           background: "#fff",
         }}
       >
@@ -154,6 +138,7 @@ export default function CapturePage() {
             color: "white",
             cursor: !file || loading ? "not-allowed" : "pointer",
             minWidth: 110,
+            fontWeight: 700,
           }}
         >
           {loading ? "Analyzing..." : "Analyze"}
@@ -178,45 +163,6 @@ export default function CapturePage() {
         </div>
       </div>
 
-      <div
-        style={{
-          border: "1px solid #ddd",
-          borderRadius: 12,
-          padding: 14,
-          background: "#fff",
-          marginBottom: 18,
-        }}
-      >
-        <div style={{ fontWeight: 700, marginBottom: 10 }}>Optional context (improves realism)</div>
-
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-          <label style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <input type="checkbox" checked={bleedingNotStop} onChange={(e) => setBleedingNotStop(e.target.checked)} />
-            Bleeding won’t stop after 10 minutes of pressure
-          </label>
-
-          <label style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <input type="checkbox" checked={numbWeak} onChange={(e) => setNumbWeak(e.target.checked)} />
-            Numbness or weakness near the injury
-          </label>
-
-          <label style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <input type="checkbox" checked={biteDirty} onChange={(e) => setBiteDirty(e.target.checked)} />
-            Bite / dirty object / contaminated wound
-          </label>
-
-          <label style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <input type="checkbox" checked={onHandFaceJoint} onChange={(e) => setOnHandFaceJoint(e.target.checked)} />
-            On face / hand / across a joint
-          </label>
-
-          <label style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <input type="checkbox" checked={highRisk} onChange={(e) => setHighRisk(e.target.checked)} />
-            Higher infection risk (optional)
-          </label>
-        </div>
-      </div>
-
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 18 }}>
         <div
           style={{
@@ -227,7 +173,7 @@ export default function CapturePage() {
             minHeight: 420,
           }}
         >
-          <div style={{ fontWeight: 600, marginBottom: 10 }}>Preview</div>
+          <div style={{ fontWeight: 700, marginBottom: 10 }}>Preview</div>
           {previewUrl ? (
             <img
               src={previewUrl}
@@ -254,7 +200,7 @@ export default function CapturePage() {
             minHeight: 420,
           }}
         >
-          <div style={{ fontWeight: 600, marginBottom: 10 }}>Result</div>
+          <div style={{ fontWeight: 700, marginBottom: 10 }}>Result</div>
 
           {!result && (
             <div style={{ color: "#777", paddingTop: 10 }}>
@@ -270,9 +216,11 @@ export default function CapturePage() {
 
           {result && result.ok && result.detected === false && (
             <div>
-              <div style={{ fontWeight: 700, marginBottom: 6 }}>Not confident enough</div>
+              <div style={{ fontWeight: 800, marginBottom: 6 }}>
+                Not confident enough
+              </div>
               <div style={{ color: "#333" }}>
-                {result.message || "Try retaking the photo (brighter, closer, no blur)."}
+                {result.message || "Try retaking with better light and focus."}
               </div>
               {typeof result.confidence === "number" && (
                 <div style={{ marginTop: 10, color: "#666" }}>
@@ -284,63 +232,57 @@ export default function CapturePage() {
 
           {result && result.ok && result.detected === true && result.assessment && (
             <div>
+              <div style={{ fontWeight: 900, fontSize: 18, marginBottom: 8 }}>
+                {result.assessment.summary}
+              </div>
+
               <div
                 style={{
-                  background: urgencyStyle.bg,
-                  border: `1px solid ${urgencyStyle.border}`,
-                  color: urgencyStyle.text,
-                  borderRadius: 10,
-                  padding: "10px 12px",
+                  display: "inline-block",
+                  padding: "6px 10px",
+                  borderRadius: 999,
+                  background: urgencyColor,
+                  color: "white",
                   fontWeight: 800,
-                  marginBottom: 14,
+                  fontSize: 12,
+                  marginBottom: 12,
                 }}
               >
                 {urgencyLabel}
               </div>
 
-              <div style={{ fontWeight: 800, fontSize: 18, marginBottom: 6 }}>
-                {result.assessment.summary}
-              </div>
-
               {typeof result.confidence === "number" && (
-                <div style={{ marginBottom: 12, color: "#666" }}>
+                <div style={{ marginBottom: 10, color: "#666" }}>
                   Detection confidence: {Math.round(result.confidence * 100)}%
                 </div>
               )}
 
-              {result.assessment.why_flagged?.length ? (
+              {result.assessment.retake_tips?.length ? (
                 <>
-                  <div style={{ marginTop: 10, fontWeight: 700 }}>Why it flagged this</div>
+                  <div style={{ marginTop: 10, fontWeight: 800 }}>Retake tips</div>
                   <ul style={{ marginTop: 6 }}>
-                    {result.assessment.why_flagged.map((t, i) => (
-                      <li key={`why-${i}`}>{t}</li>
+                    {result.assessment.retake_tips.map((t, i) => (
+                      <li key={`rt-${i}`}>{t}</li>
                     ))}
                   </ul>
                 </>
               ) : null}
 
-              {result.assessment.photo_note ? (
-                <>
-                  <div style={{ marginTop: 10, fontWeight: 700 }}>Photo note</div>
-                  <div style={{ marginTop: 6, color: "#333" }}>{result.assessment.photo_note}</div>
-                </>
-              ) : null}
-
-              <div style={{ marginTop: 12, fontWeight: 700 }}>Next steps</div>
+              <div style={{ marginTop: 10, fontWeight: 800 }}>Next steps</div>
               <ul style={{ marginTop: 6 }}>
                 {result.assessment.next_steps.map((t, i) => (
                   <li key={`ns-${i}`}>{t}</li>
                 ))}
               </ul>
 
-              <div style={{ marginTop: 10, fontWeight: 700 }}>Tips</div>
+              <div style={{ marginTop: 10, fontWeight: 800 }}>Tips</div>
               <ul style={{ marginTop: 6 }}>
                 {result.assessment.tips.map((t, i) => (
                   <li key={`tip-${i}`}>{t}</li>
                 ))}
               </ul>
 
-              <div style={{ marginTop: 10, fontWeight: 700 }}>Watch for</div>
+              <div style={{ marginTop: 10, fontWeight: 800 }}>Watch for</div>
               <ul style={{ marginTop: 6 }}>
                 {result.assessment.watch_for.map((t, i) => (
                   <li key={`wf-${i}`}>{t}</li>
@@ -350,6 +292,23 @@ export default function CapturePage() {
               <div style={{ marginTop: 12, color: "#666", fontSize: 12 }}>
                 {result.assessment.disclaimer}
               </div>
+
+              <details style={{ marginTop: 12 }}>
+                <summary style={{ cursor: "pointer", fontWeight: 700 }}>
+                  Why the app decided this (for demo / transparency)
+                </summary>
+                <pre style={{ whiteSpace: "pre-wrap", marginTop: 10, fontSize: 12 }}>
+                  {JSON.stringify(
+                    {
+                      wound_type: result.assessment.wound_type,
+                      quality: result.assessment.quality,
+                      context: result.assessment.context,
+                    },
+                    null,
+                    2
+                  )}
+                </pre>
+              </details>
             </div>
           )}
         </div>

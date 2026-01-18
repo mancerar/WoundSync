@@ -9,20 +9,14 @@ import requests
 from fastapi import FastAPI, File, UploadFile, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from PIL import Image, ImageDraw
-
-# --- load .env automatically (prevents "Missing env vars" issues) ---
-try:
-    from dotenv import load_dotenv  # type: ignore
-    load_dotenv()
-except Exception:
-    pass
+from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 logger = logging.getLogger("woundsync-backend")
 logging.basicConfig(level=logging.INFO)
 
-app = FastAPI(title="WoundSync Backend")
+app = FastAPI(title="WoundSync Backend (Roboflow + Zoom-Resistant Heuristics)")
 
+# --- CORS (adjust for deployment) ---
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -54,39 +48,76 @@ def _env_int(name: str, default: int) -> int:
     except Exception:
         return default
 
+from dotenv import load_dotenv
+load_dotenv()  # loads backend/.env when running from backend folder
 
 MIN_CONFIDENCE = _env_float("MIN_CONFIDENCE", 0.35)
-MAX_IMAGE_SIDE = _env_int("MAX_IMAGE_SIDE", 1024)
-
-# Conservative demo-safe defaults
-# Prevents "zoomed in => urgent" unless user checks danger flags
-CLOSEUP_SKIN_FRAC = _env_float("CLOSEUP_SKIN_FRAC", 0.78)
-PAPERCUT_MINOR_NORM_MAX = _env_float("PAPERCUT_MINOR_NORM_MAX", 0.038)  # thin
-PAPERCUT_MASK_AREA_MAX = _env_float("PAPERCUT_MASK_AREA_MAX", 0.004)     # small
-BLEED_DELTA_STRONG = _env_float("BLEED_DELTA_STRONG", 0.06)
-BLEED_DELTA_MED = _env_float("BLEED_DELTA_MED", 0.03)
+MAX_IMAGE_SIDE = _env_int("MAX_IMAGE_SIDE", 1600)
 
 
-def preprocess_image(image_bytes: bytes, max_side: int = 1024) -> Tuple[Image.Image, bytes]:
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+# ---------------------------
+# Image helpers
+# ---------------------------
+def preprocess_image(image_bytes: bytes, max_side: int = 1600) -> Tuple[Image.Image, bytes]:
+    """
+    - Apply EXIF orientation correction
+    - Downscale large images for faster inference while keeping detail
+    Returns (PIL image RGB, jpeg_bytes used for inference + analysis)
+    """
+    img = Image.open(io.BytesIO(image_bytes))
+    img = ImageOps.exif_transpose(img)
+    img = img.convert("RGB")
+
     w, h = img.size
     scale = min(1.0, float(max_side) / float(max(w, h)))
     if scale < 1.0:
-        new_w = max(1, int(w * scale))
-        new_h = max(1, int(h * scale))
+        new_w = max(1, int(round(w * scale)))
+        new_h = max(1, int(round(h * scale)))
         img = img.resize((new_w, new_h), Image.Resampling.LANCZOS)
 
     buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=92)
+    img.save(buf, format="JPEG", quality=92, optimize=True)
     return img, buf.getvalue()
 
 
+def photo_quality(img: Image.Image) -> Dict[str, Any]:
+    """
+    Simple, cheap quality checks:
+    - brightness
+    - edge_strength as a blur proxy
+    """
+    rgb = np.array(img.convert("RGB"), dtype=np.float32)
+    gray = (0.299 * rgb[..., 0] + 0.587 * rgb[..., 1] + 0.114 * rgb[..., 2]) / 255.0
+    brightness = float(np.mean(gray))
+
+    edges = img.convert("L").filter(ImageFilter.FIND_EDGES)
+    edge_strength = float(np.mean(np.array(edges, dtype=np.float32)) / 255.0)
+
+    exposure = "OK"
+    if brightness < 0.22:
+        exposure = "Too Dark"
+    elif brightness > 0.88:
+        exposure = "Overexposed"
+
+    sharpness = "OK"
+    if edge_strength < 0.03:
+        sharpness = "Blurry"
+
+    return {
+        "brightness": round(brightness, 3),
+        "edge_strength": round(edge_strength, 3),
+        "exposure_label": exposure,
+        "sharpness_label": sharpness,
+    }
+
+
+# ---------------------------
+# Roboflow Workflow inference
+# ---------------------------
 def roboflow_workflow_infer(image_bytes: bytes) -> Dict[str, Any]:
     api_key = os.getenv("ROBOFLOW_API_KEY", "").strip()
     workspace = os.getenv("ROBOFLOW_WORKSPACE", "").strip()
     workflow_id = os.getenv("ROBOFLOW_WORKFLOW_ID", "").strip()
-
-    # Workflows run on serverless
     api_url = os.getenv("ROBOFLOW_API_URL", "https://serverless.roboflow.com").strip().rstrip("/")
 
     if not api_key or not workspace or not workflow_id:
@@ -94,26 +125,32 @@ def roboflow_workflow_infer(image_bytes: bytes) -> Dict[str, Any]:
             "Missing Roboflow env vars. Need ROBOFLOW_API_KEY, ROBOFLOW_WORKSPACE, ROBOFLOW_WORKFLOW_ID."
         )
 
+    # Workflows endpoint
     url = f"{api_url}/infer/workflows/{workspace}/{workflow_id}"
 
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     payload = {
         "api_key": api_key,
-        "inputs": {"image": {"type": "base64", "value": b64}},
+        "inputs": {
+            "image": {"type": "base64", "value": b64}
+        },
     }
 
-    r = requests.post(url, json=payload, timeout=40)
+    r = requests.post(url, json=payload, timeout=45)
     if r.status_code != 200:
         raise RuntimeError(f"Roboflow error {r.status_code}: {r.text}")
     return r.json()
 
 
+# ---------------------------
+# Parsing predictions (robust)
+# ---------------------------
 def _is_pred_list(lst: Any) -> bool:
     if not isinstance(lst, list) or not lst:
         return False
     if not isinstance(lst[0], dict):
         return False
-    for d in lst[:5]:
+    for d in lst[:10]:
         if isinstance(d, dict) and ("confidence" in d or "score" in d):
             return True
     return False
@@ -153,6 +190,7 @@ def pred_class(p: Dict[str, Any]) -> str:
 
 
 def parse_bbox(p: Dict[str, Any], img_w: int, img_h: int) -> Optional[Tuple[int, int, int, int]]:
+    # center x/y + width/height
     if all(k in p for k in ["x", "y", "width", "height"]):
         try:
             cx = float(p["x"])
@@ -226,6 +264,9 @@ def parse_polygon_points(p: Dict[str, Any]) -> Optional[List[Tuple[int, int]]]:
     return None
 
 
+# ---------------------------
+# Mask + geometry
+# ---------------------------
 def polygon_area(points: List[Tuple[int, int]]) -> float:
     x = np.array([p[0] for p in points], dtype=np.float32)
     y = np.array([p[1] for p in points], dtype=np.float32)
@@ -244,292 +285,271 @@ def make_mask(img_w: int, img_h: int, bbox: Tuple[int, int, int, int], poly: Opt
     return mask
 
 
-def skin_fraction_rgb(arr: np.ndarray) -> float:
+def mask_perimeter(mask: np.ndarray) -> int:
     """
-    Cheap skin detector in YCbCr.
-    Not medical-grade. Just for "is this a close-up of skin" gating.
+    Approx boundary pixel count (scale-invariant when used as compactness).
     """
-    # rgb uint8 -> ycbcr
-    r = arr[..., 0].astype(np.float32)
-    g = arr[..., 1].astype(np.float32)
-    b = arr[..., 2].astype(np.float32)
-
-    y  =  0.299 * r + 0.587 * g + 0.114 * b
-    cb = -0.168736 * r - 0.331264 * g + 0.5 * b + 128
-    cr =  0.5 * r - 0.418688 * g - 0.081312 * b + 128
-
-    skin = (cb >= 77) & (cb <= 127) & (cr >= 133) & (cr <= 173) & (y >= 40)
-    return float(skin.mean())
+    m = mask.astype(np.uint8)
+    up = np.roll(m, -1, axis=0)
+    down = np.roll(m, 1, axis=0)
+    left = np.roll(m, -1, axis=1)
+    right = np.roll(m, 1, axis=1)
+    inner = (m & up & down & left & right).astype(np.uint8)
+    boundary = (m & (1 - inner)).astype(np.uint8)
+    return int(boundary.sum())
 
 
+# ---------------------------
+# Color features (scale-free)
+# ---------------------------
 def color_features(rgb_pixels: np.ndarray) -> Dict[str, float]:
+    """
+    rgb_pixels: (N,3) uint8
+    Returns robust-ish ratios. These DO NOT depend on zoom.
+    """
     if rgb_pixels.size == 0:
-        return {"redness": 0.0, "bleed": 0.0, "yellow": 0.0, "dark": 0.0}
+        return {"redness_ratio": 0.0, "bleeding_ratio": 0.0, "yellowish_ratio": 0.0, "dark_ratio": 0.0}
 
     r = rgb_pixels[:, 0].astype(np.int32)
     g = rgb_pixels[:, 1].astype(np.int32)
     b = rgb_pixels[:, 2].astype(np.int32)
 
-    redish = (r > g + 25) & (r > b + 25) & (r > 90)
+    # Redness: red dominates
+    redish = (r > g + 25) & (r > b + 25) & (r > 85)
+
+    # Bleeding-ish: strong saturated red
     bleeding = (r > 165) & (r > g + 55) & (r > b + 55)
 
-    yellowish = (r > 160) & (g > 150) & (b < 130)
+    # Yellow-ish (weak signal)
+    yellowish = (r > 160) & (g > 150) & (b < 135)
 
+    # Dark core
     lum = (0.2126 * r + 0.7152 * g + 0.0722 * b)
     dark = lum < 70
 
     n = float(len(r))
     return {
-        "redness": float(redish.sum() / n),
-        "bleed": float(bleeding.sum() / n),
-        "yellow": float(yellowish.sum() / n),
-        "dark": float(dark.sum() / n),
+        "redness_ratio": float(redish.sum() / n),
+        "bleeding_ratio": float(bleeding.sum() / n),
+        "yellowish_ratio": float(yellowish.sum() / n),
+        "dark_ratio": float(dark.sum() / n),
     }
 
 
-def mask_bbox(mask: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
-    ys, xs = np.where(mask == 1)
-    if len(xs) < 10:
-        return None
-    x1 = int(xs.min())
-    x2 = int(xs.max()) + 1
-    y1 = int(ys.min())
-    y2 = int(ys.max()) + 1
-    if x2 <= x1 or y2 <= y1:
-        return None
-    return (x1, y1, x2, y2)
-
-
-def compute_assessment(
+# ---------------------------
+# Zoom-resistant wound assessment
+# ---------------------------
+def compute_wound_assessment(
     img: Image.Image,
     bbox: Tuple[int, int, int, int],
     poly: Optional[List[Tuple[int, int]]],
-    ctx: Dict[str, bool],
+    conf: float,
 ) -> Dict[str, Any]:
+    """
+    IMPORTANT DESIGN CHOICE:
+    - Do NOT use "how big it is in the photo" to decide urgency (zoom problem).
+    - Only use scale-free cues: shape ratios, fill ratio, color ratios, ring redness, dark core.
+    """
     img_w, img_h = img.size
-    arr = np.array(img.convert("RGB"))
-    img_area = float(img_w * img_h)
+    arr = np.array(img.convert("RGB"), dtype=np.uint8)
+    mask = make_mask(img_w, img_h, bbox, poly)
 
-    raw_mask = make_mask(img_w, img_h, bbox, poly)
+    x1, y1, x2, y2 = bbox
+    bw = max(1, x2 - x1)
+    bh = max(1, y2 - y1)
 
-    # Use mask bbox for geometry (prevents sloppy bbox from causing fake "big wound")
-    mbb = mask_bbox(raw_mask)
-    if not mbb:
-        mbb = bbox
-    mx1, my1, mx2, my2 = mbb
-    mw = mx2 - mx1
-    mh = my2 - my1
+    # Shape ratios (zoom-invariant)
+    elongation = float(max(bw, bh) / (min(bw, bh) + 1e-6))          # long vs wide
+    thickness_ratio = float(min(bw, bh) / (max(bw, bh) + 1e-6))     # 0..1 (thin if small)
 
-    # Ring around wound to compare against (skin baseline)
-    pad = int(round(0.35 * max(mw, mh)))
-    ex1 = max(0, mx1 - pad)
-    ey1 = max(0, my1 - pad)
-    ex2 = min(img_w, mx2 + pad)
-    ey2 = min(img_h, my2 + pad)
+    # Mask fill inside bbox (zoom-invariant)
+    wound_area_px = float(mask.sum())
+    bbox_area_px = float(bw * bh)
+    fill_ratio = float(wound_area_px / (bbox_area_px + 1e-6))       # thin cut => small fill, scrape => higher fill
+
+    # Boundary complexity (used lightly)
+    perim = mask_perimeter(mask)
+    compactness = float((perim * perim) / (wound_area_px + 1e-6))   # higher = more irregular / thin
+
+    wound_pixels = arr[mask == 1]
+    wound_cf = color_features(wound_pixels)
+
+    # Surrounding ring redness (weak)
+    pad = int(round(0.35 * max(bw, bh)))
+    ex1 = max(0, x1 - pad)
+    ey1 = max(0, y1 - pad)
+    ex2 = min(img_w, x2 + pad)
+    ey2 = min(img_h, y2 + pad)
 
     ring = np.zeros((img_h, img_w), dtype=np.uint8)
     ring[ey1:ey2, ex1:ex2] = 1
-    ring[raw_mask == 1] = 0
-
-    wound_pixels = arr[raw_mask == 1]
+    ring[mask == 1] = 0
     ring_pixels = arr[ring == 1]
-    global_pixels = arr.reshape(-1, 3)
-
-    wound_cf = color_features(wound_pixels)
     ring_cf = color_features(ring_pixels)
-    global_cf = color_features(global_pixels)
 
-    mask_area = float(raw_mask.sum())
-    mask_area_ratio = float(mask_area / (img_area + 1e-6))
-    bbox_area = float((mx2 - mx1) * (my2 - my1))
-    fill_ratio = float(mask_area / (bbox_area + 1e-6))
+    # Wound type (best-effort)
+    looks_cut = (elongation >= 2.0 and fill_ratio <= 0.45) or (elongation >= 3.0)
+    looks_scrape = (fill_ratio >= 0.55 and elongation <= 2.4) or (wound_cf["redness_ratio"] >= 0.18 and fill_ratio >= 0.45)
 
-    elongation = float(max(mw, mh) / (min(mw, mh) + 1e-6))
-    minor_norm = float(min(mw, mh) / (min(img_w, img_h) + 1e-6))
-    major_norm = float(max(mw, mh) / (min(img_w, img_h) + 1e-6))
-
-    skin_frac = skin_fraction_rgb(arr)
-    closeup = skin_frac >= CLOSEUP_SKIN_FRAC
-
-    # Make bleeding + redness relative to surrounding skin (fixes pink finger skin)
-    bleed_delta = max(0.0, wound_cf["bleed"] - ring_cf["bleed"])
-    redness_spread = max(0.0, ring_cf["redness"] - global_cf["redness"])
-
-    # Basic wound type
-    looks_like_cut = (elongation >= 2.6 and fill_ratio <= 0.55) or (elongation >= 3.1)
-    looks_like_scrape = (not looks_like_cut) and (fill_ratio >= 0.45 and mask_area_ratio >= 0.004)
-
-    if looks_like_cut:
+    if looks_cut and not looks_scrape:
         wound_type = "cut"
         summary = "This looks like a cut / laceration."
-    elif looks_like_scrape:
+    elif looks_scrape and not looks_cut:
         wound_type = "scrape"
         summary = "This looks like a scrape / abrasion."
     else:
         wound_type = "uncertain"
-        summary = "Wound detected, but the type is unclear from the image."
+        summary = "Wound detected, but the type is unclear from this photo."
 
-    # Danger flags (user-provided)
-    bleeding_not_stop = ctx.get("bleeding_not_stop", False)
-    numbness_weakness = ctx.get("numbness_weakness", False)
-    bite_dirty = ctx.get("bite_dirty", False)
-    on_hand_face_joint = ctx.get("on_hand_face_joint", False)
-    high_risk = ctx.get("high_risk", False)
-
-    why: List[str] = []
-    photo_note = "Best photo: bright lighting, no blur, wound centered, minimal glare."
-
-    # Severity score (conservative)
+    # -----------------------
+    # Urgency scoring (NO size-in-frame!)
+    # -----------------------
     score = 0.0
 
-    # Strong overrides
-    if bleeding_not_stop:
-        score += 4.0
-        why.append("You indicated bleeding that won’t stop after 10 minutes of pressure")
-    if numbness_weakness:
-        score += 4.0
-        why.append("You indicated numbness or weakness near the injury")
-
-    # Geometry-based depth/gape proxy (use minor width, not overall zoom)
-    if minor_norm >= 0.070:
-        score += 2.8
-        why.append("Wound looks relatively wide / may gape open")
-    elif minor_norm >= 0.050:
-        score += 1.8
-        why.append("Wound width looks moderate")
-
-    # Dark core proxy (weak)
-    if wound_cf["dark"] >= 0.22 and looks_like_cut:
-        score += 1.2
-        why.append("Color pattern suggests deeper tissue shadow (weak signal)")
-
-    # Bleeding proxy (relative to ring)
-    if bleed_delta >= BLEED_DELTA_STRONG:
-        score += 2.0
-        why.append("Color looks consistent with active bleeding (relative to surrounding skin)")
-    elif bleed_delta >= BLEED_DELTA_MED:
-        score += 1.0
-        why.append("Color may indicate some bleeding (relative to surrounding skin)")
-
-    # Surrounding redness (localized vs entire photo)
-    if redness_spread >= 0.08:
+    # Bleeding cues
+    if wound_cf["bleeding_ratio"] >= 0.06:
+        score += 2.4
+    elif wound_cf["bleeding_ratio"] >= 0.03:
+        score += 1.6
+    elif wound_cf["bleeding_ratio"] >= 0.015:
         score += 0.8
-        why.append("Surrounding redness looks notable compared to the rest of the photo")
-    elif redness_spread >= 0.05:
-        score += 0.4
-        why.append("Some surrounding redness detected")
 
-    # Contamination risk
-    if bite_dirty:
+    # Dark core cues (depth/shadow proxy; imperfect)
+    if wound_cf["dark_ratio"] >= 0.40:
+        score += 2.2
+    elif wound_cf["dark_ratio"] >= 0.25:
         score += 1.4
-        why.append("Bite / dirty or contaminated wound increases risk")
-    if high_risk:
-        score += 0.6
-        why.append("Higher infection risk increases caution")
+    elif wound_cf["dark_ratio"] >= 0.16:
+        score += 0.7
 
-    # Location should NOT auto-escalate to urgent
-    if on_hand_face_joint:
-        score += 0.6
-        why.append("You indicated face/hand/joint location (more likely to need evaluation)")
+    # "Wider" cuts are more concerning than thin papercuts (still zoom-invariant)
+    # papercut: thickness_ratio tiny (e.g. 0.05–0.15)
+    if wound_type == "cut":
+        if thickness_ratio >= 0.38:
+            score += 2.0
+        elif thickness_ratio >= 0.28:
+            score += 1.2
+        elif thickness_ratio <= 0.14:
+            score -= 0.6  # actively de-escalate thin cuts (fixes zoomed papercut panic)
 
-    # Close-up cap to prevent papercut panic
-    # If it looks like a thin small cut AND user did not hit danger flags,
-    # don't allow "urgent" purely off image.
-    papercut_like = (minor_norm <= PAPERCUT_MINOR_NORM_MAX) and (mask_area_ratio <= PAPERCUT_MASK_AREA_MAX) and (fill_ratio <= 0.55)
+    # Surrounding redness (weak, don’t over-weight)
+    if ring_cf["redness_ratio"] >= 0.25:
+        score += 0.7
+    elif ring_cf["redness_ratio"] >= 0.18:
+        score += 0.4
 
-    if closeup:
-        photo_note = "This looks like a close-up photo. For better calibration, take one zoomed-out photo showing more surrounding area."
-        why.append("Photo appears to be a close-up (scale is harder to estimate from zoom)")
+    # Yellow-ish (very weak)
+    if wound_cf["yellowish_ratio"] >= 0.08:
+        score += 0.5
 
-        if papercut_like and (not bleeding_not_stop) and (not numbness_weakness):
-            # hard cap: can't be urgent from image-only in this case
-            score = min(score, 1.6)
-            why.append("Thin small cut pattern: urgency capped unless danger symptoms are selected")
+    # Low confidence => don’t escalate; suggest retake instead
+    if conf < 0.45:
+        score -= 0.8
 
-    # Decide urgency
-    if score >= 3.2:
+    # Map score -> urgency
+    if score >= 4.0:
         urgency = "urgent"
-    elif score >= 1.7:
+    elif score >= 2.0:
         urgency = "soon"
     else:
         urgency = "home"
 
-    # Build output guidance (safe + demo-friendly)
+    # -----------------------
+    # Guidance (practical + realistic)
+    # -----------------------
     disclaimer = "Not a diagnosis. Image-only guidance can be wrong. If you’re worried, get checked in person."
+
+    retake_tips: List[str] = []
+    q = photo_quality(img)
+    if q["exposure_label"] != "OK":
+        retake_tips.append("Retake in bright, even indoor light (avoid harsh shadows / direct sun).")
+    if q["sharpness_label"] != "OK":
+        retake_tips.append("Hold steady and tap-to-focus on the wound (or rest your hand on a surface).")
+    if conf < 0.55:
+        retake_tips.append("Fill more of the frame with the wound, but keep edges visible and in focus (avoid extreme blur).")
+    retake_tips.append("Avoid glare: wipe moisture and tilt slightly so light doesn’t reflect off shiny skin.")
 
     next_steps: List[str] = []
     tips: List[str] = []
     watch_for: List[str] = []
 
+    # Common wound care (safe baseline)
+    base_tips = [
+        "Rinse with clean running water. Use mild soap around the area (don’t scrub inside a cut).",
+        "Apply a thin layer of petroleum jelly. Cover with a non-stick dressing.",
+        "Change dressing daily (or sooner if wet/dirty). Keep it clean and protected.",
+        "Avoid hydrogen peroxide or alcohol repeatedly (can slow healing).",
+    ]
+
+    # Stitch/closure is about gaping depth + location + bleeding (NOT size in photo)
     if urgency == "urgent":
-        next_steps.append("Urgent care recommended today.")
-        next_steps.append("If the cut separates when you gently pull the edges, is deep, or won’t stay closed, it may need closure (stitches/skin glue/steri-strips).")
+        next_steps.append("This photo has features that can sometimes be seen with a deeper/wider cut or active bleeding.")
+        next_steps.append("Consider urgent care today—especially if the wound edges gape open, won’t stay closed, or bleeding persists.")
         tips.extend([
-            "If bleeding: apply firm, steady pressure with clean gauze/cloth for 10 minutes without checking.",
-            "Rinse with clean running water. Use mild soap around the area (don’t scrub inside the wound).",
-            "Cover with a non-stick dressing. Keep it protected until you’re seen.",
-            "If dirty or tetanus status is unclear, ask about a tetanus booster.",
+            "If bleeding: apply firm, steady pressure with clean gauze/cloth for 10 minutes without peeking.",
+            "If the cut is gaping, don’t force it closed with tape—keep it covered until you’re seen.",
+            "If the wound is dirty or you’re not up to date on tetanus shots, ask about a tetanus booster.",
         ])
+        tips.extend(base_tips)
         watch_for.extend([
             "Bleeding that won’t stop after 10 minutes of firm pressure",
-            "Wound edges gaping open, deep tissue visible, or numbness/weakness",
-            "Rapidly spreading redness, worsening pain, fever, or thick drainage",
+            "Wound edges gaping open, deep tissue visible, or new numbness/weakness",
+            "Rapidly spreading redness, worsening pain, fever, thick/cloudy drainage, or red streaking",
         ])
     elif urgency == "soon":
-        next_steps.append("Get checked soon (same day or next day) if symptoms worsen or the wound won’t stay closed.")
-        tips.extend([
-            "Rinse with clean water. Clean gently with mild soap around the wound.",
-            "Apply a thin layer of petroleum jelly and cover with a non-stick dressing.",
-            "Change the dressing daily (or if wet/dirty). Avoid picking at scabs.",
-            "Take a follow-up photo in 24 hours in similar lighting to compare.",
-        ])
+        next_steps.append("This may be worth a same-day or next-day check if symptoms worsen or you’re unsure.")
+        next_steps.append("If pain, swelling, warmth, or drainage increases instead of improving, get checked.")
+        tips.extend(base_tips)
+        tips.append("Retake a photo in ~24 hours in similar lighting to compare changes.")
         watch_for.extend([
             "Redness spreading outward day to day",
             "Pain increasing instead of improving",
             "Swelling, warmth, bad smell, or cloudy drainage",
         ])
     else:
-        next_steps.append("Looks suitable for basic home care if symptoms are mild.")
-        tips.extend([
-            "Rinse with clean water. Use mild soap around the area.",
-            "Apply a thin layer of petroleum jelly and cover with a non-stick dressing.",
-            "Change the dressing daily (or if wet/dirty). Keep it clean and protected.",
-        ])
+        next_steps.append("This looks consistent with a more superficial wound in this photo (even if zoomed in).")
+        next_steps.append("Home care + monitoring is reasonable if symptoms are mild and improving.")
+        tips.extend(base_tips)
+        if wound_type == "cut":
+            tips.append("Thin cuts (papercuts) often look dramatic when zoomed—focus on symptoms and whether it’s closing.")
+        if wound_type == "scrape":
+            tips.append("Scrapes usually heal faster when kept slightly moist and covered (not dried out).")
         watch_for.extend([
             "Redness spreading, increasing pain, swelling, warmth",
-            "Drainage, fever, or the wound not improving over a few days",
+            "Drainage, fever, or not improving over 48–72 hours",
         ])
 
+    # Extra targeted notes
     if wound_type == "cut":
-        tips.append("Cuts over joints/hands/face or from bites/dirty objects usually deserve a clinician check.")
-    if wound_type == "scrape":
-        tips.append("Scrapes usually heal faster when kept moist + covered (not dried out).")
-    if bleed_delta >= BLEED_DELTA_MED:
-        tips.append("If actively bleeding, prioritize pressure + dressing first, ointment after.")
+        tips.append("Cuts on face/hands, over joints, or from bites typically deserve clinician advice.")
+    if wound_cf["bleeding_ratio"] >= 0.05:
+        tips.append("Because there may be active bleeding, prioritize pressure + dressing first (ointment later).")
+
+    # “why” explanation (for demo / transparency)
+    context = {
+        "confidence": round(float(conf), 3),
+        "shape": {
+            "elongation": round(elongation, 2),
+            "thickness_ratio": round(thickness_ratio, 3),
+            "fill_ratio": round(fill_ratio, 3),
+            "compactness": round(compactness, 1),
+        },
+        "wound_color": {k: round(v, 3) for k, v in wound_cf.items()},
+        "ring_color": {k: round(v, 3) for k, v in ring_cf.items()},
+        "note": "Urgency is NOT based on wound size in the photo (zoom-safe). It uses shape + color cues instead.",
+    }
 
     return {
         "summary": summary,
-        "urgency": urgency,  # home | soon | urgent
-        "wound_type": wound_type,
-        "photo_note": photo_note,
-        "why_flagged": why,
+        "urgency": urgency,            # "home" | "soon" | "urgent"
+        "wound_type": wound_type,      # "cut" | "scrape" | "uncertain"
         "disclaimer": disclaimer,
         "next_steps": next_steps,
         "tips": tips,
         "watch_for": watch_for,
-        "signals": {
-            "closeup": closeup,
-            "skin_frac": round(skin_frac, 3),
-            "mask_area_ratio": round(mask_area_ratio, 4),
-            "fill_ratio": round(fill_ratio, 3),
-            "elongation": round(elongation, 2),
-            "minor_norm": round(minor_norm, 3),
-            "major_norm": round(major_norm, 3),
-            "bleed_delta": round(bleed_delta, 3),
-            "redness_spread": round(redness_spread, 3),
-            "wound_color": {k: round(v, 3) for k, v in wound_cf.items()},
-            "ring_color": {k: round(v, 3) for k, v in ring_cf.items()},
-        },
+        "retake_tips": retake_tips,
+        "quality": q,
+        "context": context,
     }
 
 
@@ -542,13 +562,6 @@ def health():
 async def predict(
     image: UploadFile = File(...),
     debug: bool = Query(False),
-
-    # context flags from UI
-    bleeding_not_stop: bool = Query(False),
-    numbness_weakness: bool = Query(False),
-    bite_dirty: bool = Query(False),
-    on_hand_face_joint: bool = Query(False),
-    high_risk: bool = Query(False),
 ):
     try:
         image_bytes = await image.read()
@@ -563,7 +576,11 @@ async def predict(
                 if isinstance(p, dict) and pred_conf(p) > 0:
                     all_preds.append(p)
 
-        wound_preds = [p for p in all_preds if pred_class(p).lower() in ["wound", "abrasion", "cut", "laceration"]]
+        # Prefer wound-ish classes if your model uses them; otherwise keep all
+        wound_preds = [
+            p for p in all_preds
+            if pred_class(p).lower() in ["wound", "abrasion", "cut", "laceration"]
+        ]
         candidates = wound_preds if wound_preds else all_preds
 
         if not candidates:
@@ -603,7 +620,7 @@ async def predict(
                     "ok": True,
                     "detected": False,
                     "confidence": conf,
-                    "message": "Not confident enough. Retake the photo (brighter, closer, no blur, less glare).",
+                    "message": "Not confident enough. Retake with better light and focus.",
                     "min_confidence": MIN_CONFIDENCE,
                     "debug": rf_json if debug else None,
                 },
@@ -625,15 +642,7 @@ async def predict(
                 },
             )
 
-        ctx = {
-            "bleeding_not_stop": bleeding_not_stop,
-            "numbness_weakness": numbness_weakness,
-            "bite_dirty": bite_dirty,
-            "on_hand_face_joint": on_hand_face_joint,
-            "high_risk": high_risk,
-        }
-
-        assessment = compute_assessment(pil_img, bbox, poly, ctx)
+        assessment = compute_wound_assessment(pil_img, bbox, poly, conf=conf)
 
         return JSONResponse(
             status_code=200,
