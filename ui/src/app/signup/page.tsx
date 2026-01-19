@@ -19,16 +19,39 @@ export default function Signup() {
     e.preventDefault();
     if (!username || !email || pw.length < 8)
       return alert("Enter username, email & 8+ char password");
-    // Create account in Firebase then mirror to local storage
+    
+    // FIREBASE AUTHENTICATION - COMMENTED OUT FOR NOW
+    // Uncomment this block when Firebase is configured
+    /*
     signUp(email, pw)
       .then(() => {
         setUser({ email, username });
+        alert("Account created successfully! Welcome to WoundSync.");
         router.replace("/dashboard");
       })
       .catch((err) => {
         console.error(err);
-        alert("Sign up failed: " + (err?.message ?? err));
+        const errorCode = err?.code;
+        let errorMessage = "Sign up failed";
+        
+        if (errorCode === "auth/email-already-in-use") {
+          errorMessage = "This email is already registered. Please log in instead.";
+        } else if (errorCode === "auth/invalid-email") {
+          errorMessage = "Invalid email address.";
+        } else if (errorCode === "auth/weak-password") {
+          errorMessage = "Password is too weak. Use at least 8 characters with letters and numbers.";
+        } else if (err?.message) {
+          errorMessage = err.message;
+        }
+        
+        alert(errorMessage);
       });
+    */
+    
+    // Temporary local-only signup (no Firebase)
+    setUser({ uid: email, email, username, displayName: username });
+    alert("Account created successfully! Welcome to WoundSync.");
+    router.replace("/dashboard");
   }
 
   return (

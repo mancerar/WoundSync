@@ -21,7 +21,10 @@ export default function Login() {
     e.preventDefault();
     if (!email || !username) return alert("Enter email and username");
     if (!pw) return alert("Enter password");
-    // Try to sign in via Firebase, then mirror to local storage for existing UI
+    
+    // FIREBASE AUTHENTICATION - COMMENTED OUT FOR NOW
+    // Uncomment this block when Firebase is configured
+    /*
     signIn(email, pw)
       .then(() => {
         setUser({ email, username });
@@ -29,8 +32,28 @@ export default function Login() {
       })
       .catch((err) => {
         console.error(err);
-        alert("Sign in failed: " + (err?.message ?? err));
+        const errorCode = err?.code;
+        let errorMessage = "Sign in failed";
+        
+        if (errorCode === "auth/user-not-found" || errorCode === "auth/invalid-credential") {
+          errorMessage = "Account not found. Please create a new account.";
+        } else if (errorCode === "auth/wrong-password") {
+          errorMessage = "Incorrect password. Please try again.";
+        } else if (errorCode === "auth/invalid-email") {
+          errorMessage = "Invalid email address.";
+        } else if (errorCode === "auth/too-many-requests") {
+          errorMessage = "Too many failed attempts. Please try again later.";
+        } else if (err?.message) {
+          errorMessage = err.message;
+        }
+        
+        alert(errorMessage);
       });
+    */
+    
+    // Temporary local-only login (no Firebase)
+    setUser({ uid: email, email, username, displayName: username });
+    router.replace("/dashboard");
   }
 
   return (

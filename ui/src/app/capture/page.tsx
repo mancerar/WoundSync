@@ -94,7 +94,30 @@ export default function CapturePage() {
         Upload a photo. Guidance is based on shape + visual cues (not “size in photo”),
         so zoomed-in papercuts won’t automatically be treated as severe.
       </div>
-
+      {/* Photo Taking Tips */}
+      <div
+        style={{
+          padding: 14,
+          background: "#f0f7ff",
+          border: "1px solid #2b59ff",
+          borderRadius: 12,
+          marginBottom: 18,
+        }}
+      >
+        <div style={{ fontWeight: 700, marginBottom: 8, color: "#1a3d7a" }}>
+          📸 Tips for Best Results:
+        </div>
+        <ul style={{ margin: 0, paddingLeft: 20, color: "#333" }}>
+          <li>Hold your device steady (rest your hand on a stable surface)</li>
+          <li>Use good lighting - natural daylight works best</li>
+          <li>Tap to focus on the wound before taking the photo</li>
+          <li>Avoid glare - wipe moisture and tilt slightly so light doesn't reflect off shiny skin</li>
+          <li>Keep the wound centered in the frame</li>
+          <li>Don't zoom in too much - include some surrounding skin for context</li>
+          <li>Take the photo from directly above the wound (perpendicular)</li>
+          <li>Ensure the wound is clean and visible before photographing</li>
+        </ul>
+      </div>
       <div
         style={{
           display: "flex",
@@ -176,7 +199,11 @@ export default function CapturePage() {
           <div style={{ fontWeight: 700, marginBottom: 10 }}>Preview</div>
           {previewUrl ? (
             <img
-              src={previewUrl}
+              src={
+                result?.annotated_image 
+                  ? `data:image/jpeg;base64,${result.annotated_image}`
+                  : previewUrl
+              }
               alt="preview"
               style={{
                 width: "100%",
@@ -230,25 +257,11 @@ export default function CapturePage() {
             </div>
           )}
 
-          {result && result.ok && result.detected === true && result.assessment && (
+          {result && result.ok && result.detected === true && (
             <div>
+              {/* Wound Detection Status */}
               <div style={{ fontWeight: 900, fontSize: 18, marginBottom: 8 }}>
-                {result.assessment.summary}
-              </div>
-
-              <div
-                style={{
-                  display: "inline-block",
-                  padding: "6px 10px",
-                  borderRadius: 999,
-                  background: urgencyColor,
-                  color: "white",
-                  fontWeight: 800,
-                  fontSize: 12,
-                  marginBottom: 12,
-                }}
-              >
-                {urgencyLabel}
+                Wound Detected: {result.method || "Analysis Complete"}
               </div>
 
               {typeof result.confidence === "number" && (
@@ -257,58 +270,222 @@ export default function CapturePage() {
                 </div>
               )}
 
-              {result.assessment.retake_tips?.length ? (
+              {/* Measurements */}
+              {result.measurements && (
                 <>
-                  <div style={{ marginTop: 10, fontWeight: 800 }}>Retake tips</div>
-                  <ul style={{ marginTop: 6 }}>
-                    {result.assessment.retake_tips.map((t, i) => (
-                      <li key={`rt-${i}`}>{t}</li>
-                    ))}
-                  </ul>
+                  <div style={{ marginTop: 14, fontWeight: 800, fontSize: 16 }}>📏 Measurements</div>
+                  <div style={{ marginTop: 6, paddingLeft: 10 }}>
+                    <div>Length: {result.measurements.length_cm?.toFixed(2) || 'N/A'} cm</div>
+                    <div>Width: {result.measurements.width_cm?.toFixed(2) || 'N/A'} cm</div>
+                    <div>Area: {result.measurements.area_cm2?.toFixed(2) || 'N/A'} cm²</div>
+                    {result.measurements.perimeter_cm > 0 && (
+                      <div>Perimeter: {result.measurements.perimeter_cm?.toFixed(2)} cm</div>
+                    )}
+                  </div>
                 </>
-              ) : null}
+              )}
 
-              <div style={{ marginTop: 10, fontWeight: 800 }}>Next steps</div>
-              <ul style={{ marginTop: 6 }}>
-                {result.assessment.next_steps.map((t, i) => (
-                  <li key={`ns-${i}`}>{t}</li>
-                ))}
-              </ul>
+              {/* Color Analysis */}
+              {result.color_analysis && (
+                <>
+                  <div style={{ marginTop: 14, fontWeight: 800, fontSize: 16 }}>🎨 Color Analysis</div>
+                  <div style={{ marginTop: 6, paddingLeft: 10 }}>
+                    <div>Description: {result.color_analysis.color_description}</div>
+                    <div>Redness Level: {(result.color_analysis.redness_level * 100).toFixed(1)}%</div>
+                    {result.color_analysis.color_percentages && (
+                      <div style={{ marginTop: 4 }}>
+                        {Object.entries(result.color_analysis.color_percentages).map(([color, pct]: any) => (
+                          <div key={color}>- {color}: {pct.toFixed(1)}%</div>
+                        ))}
+                      </div>
+                    )}
+                    {result.color_analysis.health_indicators && (
+                      <div style={{ marginTop: 6 }}>
+                        <div style={{ fontWeight: 700 }}>Health Indicators:</div>
+                        {result.color_analysis.health_indicators.healthy_pink_present && (
+                          <div style={{ color: '#1b6e1b' }}>✅ Healthy Pink Present</div>
+                        )}
+                        {result.color_analysis.health_indicators.excessive_redness && (
+                          <div style={{ color: '#b36b00' }}>⚠️ Excessive Redness</div>
+                        )}
+                        {result.color_analysis.health_indicators.signs_of_infection && (
+                          <div style={{ color: '#b00020' }}>⚠️ Signs Of Infection</div>
+                        )}
+                        {result.color_analysis.health_indicators.necrotic_tissue && (
+                          <div style={{ color: '#b00020' }}>⚠️ Necrotic Tissue</div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
 
-              <div style={{ marginTop: 10, fontWeight: 800 }}>Tips</div>
-              <ul style={{ marginTop: 6 }}>
-                {result.assessment.tips.map((t, i) => (
-                  <li key={`tip-${i}`}>{t}</li>
-                ))}
-              </ul>
+              {/* Healing Assessment */}
+              {result.healing_assessment && (
+                <>
+                  <div style={{ marginTop: 14, fontWeight: 800, fontSize: 16 }}>🔄 Healing Assessment</div>
+                  <div style={{ marginTop: 6, paddingLeft: 10 }}>
+                    <div>Stage: {result.healing_assessment.healing_stage?.toUpperCase()}</div>
+                    <div>Progress: {result.healing_assessment.healing_progress?.toUpperCase()}</div>
+                    <div>Severity: {result.healing_assessment.severity?.toUpperCase()}</div>
+                    
+                    {result.healing_assessment.healing_indicators?.length > 0 && (
+                      <div style={{ marginTop: 6 }}>
+                        <div style={{ fontWeight: 700 }}>Positive Signs:</div>
+                        <ul style={{ marginTop: 2 }}>
+                          {result.healing_assessment.healing_indicators.map((sign: string, i: number) => (
+                            <li key={`hi-${i}`}>{sign}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
 
-              <div style={{ marginTop: 10, fontWeight: 800 }}>Watch for</div>
-              <ul style={{ marginTop: 6 }}>
-                {result.assessment.watch_for.map((t, i) => (
-                  <li key={`wf-${i}`}>{t}</li>
-                ))}
-              </ul>
+                    {result.healing_assessment.concerns?.length > 0 && (
+                      <div style={{ marginTop: 6 }}>
+                        <div style={{ fontWeight: 700 }}>Concerns:</div>
+                        <ul style={{ marginTop: 2 }}>
+                          {result.healing_assessment.concerns.map((concern: string, i: number) => (
+                            <li key={`c-${i}`}>{concern}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    
+                    {result.healing_assessment.infection_risk && (
+                      <div style={{ marginTop: 6 }}>
+                        Infection Likelihood: {result.healing_assessment.infection_risk.level?.toUpperCase()} ({result.healing_assessment.infection_risk.score}%)
+                      </div>
+                    )}
 
-              <div style={{ marginTop: 12, color: "#666", fontSize: 12 }}>
-                {result.assessment.disclaimer}
-              </div>
+                    {result.healing_assessment.healing_time_prediction && (
+                      <div style={{ marginTop: 6 }}>
+                        <div style={{ fontWeight: 700 }}>Healing Time Prediction:</div>
+                        <div>Estimated: {result.healing_assessment.healing_time_prediction.predicted_days_min}–{result.healing_assessment.healing_time_prediction.predicted_days_max} days</div>
+                        <div style={{ fontSize: 13, color: '#666' }}>
+                          Confidence: {result.healing_assessment.healing_time_prediction.confidence}
+                        </div>
+                        {result.healing_assessment.healing_time_prediction.notes && (
+                          <div style={{ fontSize: 13, color: '#666', fontStyle: 'italic' }}>
+                            {result.healing_assessment.healing_time_prediction.notes}
+                          </div>
+                        )}
+                      </div>
+                    )}
 
-              <details style={{ marginTop: 12 }}>
-                <summary style={{ cursor: "pointer", fontWeight: 700 }}>
-                  Why the app decided this (for demo / transparency)
-                </summary>
-                <pre style={{ whiteSpace: "pre-wrap", marginTop: 10, fontSize: 12 }}>
-                  {JSON.stringify(
-                    {
-                      wound_type: result.assessment.wound_type,
-                      quality: result.assessment.quality,
-                      context: result.assessment.context,
-                    },
-                    null,
-                    2
+                    {result.healing_assessment.stitches && (
+                      <div style={{ marginTop: 6 }}>
+                        {result.healing_assessment.stitches.need_stitches ? (
+                          <div style={{ color: '#b00020', fontWeight: 700 }}>
+                            ⚠️ {result.healing_assessment.stitches.recommendation}
+                          </div>
+                        ) : (
+                          <div style={{ color: '#1b6e1b', fontWeight: 700 }}>
+                            ✅ Closure: {result.healing_assessment.stitches.recommendation || 'LIKELY HEALS NATURALLY'}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {result.healing_assessment.scar_risk && (
+                      <div style={{ marginTop: 6 }}>
+                        <div style={{ fontWeight: 700 }}>Scar Risk: {result.healing_assessment.scar_risk.risk?.toUpperCase()} ({result.healing_assessment.scar_risk.score}%)</div>
+                        {result.healing_assessment.scar_risk.tips?.length > 0 && (
+                          <ul style={{ marginTop: 2, fontSize: 13 }}>
+                            {result.healing_assessment.scar_risk.tips.map((tip: string, i: number) => (
+                              <li key={`scar-${i}`}>{tip}</li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+
+              {/* Recommendations */}
+              {result.recommendations && (
+                <>
+                  <div style={{ marginTop: 14, fontWeight: 800, fontSize: 16 }}>💊 Treatment Recommendations</div>
+                  
+                  {result.recommendations.immediate_care?.length > 0 && (
+                    <>
+                      <div style={{ marginTop: 8, fontWeight: 700 }}>Immediate Care:</div>
+                      <ul style={{ marginTop: 4 }}>
+                        {result.recommendations.immediate_care.map((step: string, i: number) => (
+                          <li key={`ic-${i}`}>{step}</li>
+                        ))}
+                      </ul>
+                    </>
                   )}
-                </pre>
-              </details>
+
+                  {result.recommendations.ongoing_care?.length > 0 && (
+                    <>
+                      <div style={{ marginTop: 8, fontWeight: 700 }}>Daily Care Protocol:</div>
+                      <ul style={{ marginTop: 4 }}>
+                        {result.recommendations.ongoing_care.map((step: string, i: number) => (
+                          <li key={`oc-${i}`}>{step}</li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+
+                  {result.recommendations.medications && (
+                    <>
+                      <div style={{ marginTop: 8, fontWeight: 700 }}>Medications:</div>
+                      <div style={{ paddingLeft: 10, marginTop: 4 }}>
+                        {result.recommendations.medications.healing_aids?.map((med: string, i: number) => (
+                          <div key={`ha-${i}`} style={{ marginTop: 2 }}>• {med}</div>
+                        ))}
+                        {result.recommendations.medications.pain_management?.map((med: string, i: number) => (
+                          <div key={`pm-${i}`} style={{ marginTop: 2 }}>• {med}</div>
+                        ))}
+                        {result.recommendations.medications.cautions && (
+                          <>
+                            <div style={{ marginTop: 6, fontWeight: 700 }}>Cautions:</div>
+                            {result.recommendations.medications.cautions.map((caution: string, i: number) => (
+                              <div key={`caut-${i}`} style={{ marginTop: 2 }}>• {caution}</div>
+                            ))}
+                          </>
+                        )}
+                      </div>
+                    </>
+                  )}
+
+                  {result.recommendations.warning_signs?.length > 0 && (
+                    <>
+                      <div style={{ marginTop: 8, fontWeight: 700 }}>⚠️ Warning Signs:</div>
+                      <ul style={{ marginTop: 4 }}>
+                        {result.recommendations.warning_signs.map((sign: string, i: number) => (
+                          <li key={`ws-${i}`}>{sign}</li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+
+                  {result.recommendations.follow_up && (
+                    <div style={{ marginTop: 8, color: '#666' }}>
+                      Follow-up: {result.recommendations.follow_up}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* Overall Assessment */}
+              {result.overall_assessment && (
+                <div style={{ marginTop: 14, padding: 10, background: '#f5f5f5', borderRadius: 8, borderLeft: '4px solid #2b59ff' }}>
+                  <div style={{ fontWeight: 700 }}>Clinical Summary:</div>
+                  <div style={{ marginTop: 4 }}>{result.overall_assessment}</div>
+                </div>
+              )}
+
+              {/* Calibration Info */}
+              {result.calibration && (
+                <div style={{ marginTop: 14, fontSize: 13, color: '#666', padding: 8, background: '#f9f9f9', borderRadius: 6 }}>
+                  <div style={{ fontWeight: 700 }}>📐 Calibration:</div>
+                  <div>Mode: {result.calibration.mode || 'Standard'}</div>
+                  <div>Pixels per cm: {result.pixels_per_cm || result.calibration.ppcm || 'N/A'}</div>
+                </div>
+              )}
             </div>
           )}
         </div>

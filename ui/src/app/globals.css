@@ -170,7 +170,7 @@
 
 /* Consistent mobile-friendly content wrapper */
 .ws-container {
-  max-width: 540px;
+  max-width: 1200px;
   margin-left: auto;
   margin-right: auto;
   padding: 2rem 1rem 3rem; /* pt-8 px-4 pb-12 */

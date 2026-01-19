@@ -1,20 +1,48 @@
 import base64
 import io
+import json
 import logging
 import os
+import tempfile
 from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import requests
-from fastapi import FastAPI, File, UploadFile, Query
+from fastapi import FastAPI, File, UploadFile, Query, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
+from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
 logger = logging.getLogger("woundsync-backend")
 logging.basicConfig(level=logging.INFO)
 
+# Import wound analyzer for comprehensive analysis
+try:
+    from .wound_analyzer import analyze_wound_image
+    logger.info("✓ Comprehensive wound analyzer loaded successfully")
+except ImportError as e:
+    logger.warning(f"✗ Wound analyzer not available: {e}")
+    analyze_wound_image = None
+
+# Import database and models
+from .database import Base, db_engine
+from .models import WoundProfile, WoundRecord
+from .routes import router as profile_router
+from .charts import router as charts_router
+
+# Create database tables
+Base.metadata.create_all(bind=db_engine)
+logger.info("✓ Database tables created")
+
 app = FastAPI(title="WoundSync Backend (Roboflow + Zoom-Resistant Heuristics)")
+
+# Include wound profile routes
+app.include_router(profile_router)
+app.include_router(charts_router)
 
 # --- CORS (adjust for deployment) ---
 app.add_middleware(
@@ -112,34 +140,66 @@ def photo_quality(img: Image.Image) -> Dict[str, Any]:
 
 
 # ---------------------------
-# Roboflow Workflow inference
+# Roboflow Model inference (currently active)
 # ---------------------------
 def roboflow_workflow_infer(image_bytes: bytes) -> Dict[str, Any]:
+    """
+    Infers using Roboflow Model (direct model endpoint).
+    Can be switched to Workflow inference when workflow is set up.
+    """
     api_key = os.getenv("ROBOFLOW_API_KEY", "").strip()
-    workspace = os.getenv("ROBOFLOW_WORKSPACE", "").strip()
-    workflow_id = os.getenv("ROBOFLOW_WORKFLOW_ID", "").strip()
+    model_id = os.getenv("ROBOFLOW_MODEL_ID", "").strip()
     api_url = os.getenv("ROBOFLOW_API_URL", "https://serverless.roboflow.com").strip().rstrip("/")
 
-    if not api_key or not workspace or not workflow_id:
-        raise RuntimeError(
-            "Missing Roboflow env vars. Need ROBOFLOW_API_KEY, ROBOFLOW_WORKSPACE, ROBOFLOW_WORKFLOW_ID."
-        )
-
-    # Workflows endpoint
-    url = f"{api_url}/infer/workflows/{workspace}/{workflow_id}"
-
+    if not api_key:
+        raise RuntimeError("Missing ROBOFLOW_API_KEY environment variable.")
+    
+    if not model_id:
+        raise RuntimeError("Missing ROBOFLOW_MODEL_ID environment variable.")
+    
+    # Model inference endpoint - API key goes in URL for detect.roboflow.com
+    url = f"{api_url}/{model_id}?api_key={api_key}"
     b64 = base64.b64encode(image_bytes).decode("utf-8")
-    payload = {
-        "api_key": api_key,
-        "inputs": {
-            "image": {"type": "base64", "value": b64}
-        },
-    }
-
-    r = requests.post(url, json=payload, timeout=45)
+    
+    # For detect.roboflow.com, send the base64 string directly
+    r = requests.post(url, data=b64, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=45)
     if r.status_code != 200:
         raise RuntimeError(f"Roboflow error {r.status_code}: {r.text}")
     return r.json()
+
+
+# ---------------------------
+# Roboflow Workflow inference (for future use - currently commented out)
+# ---------------------------
+# def roboflow_workflow_infer(image_bytes: bytes) -> Dict[str, Any]:
+#     """
+#     Infers using Roboflow Workflow endpoint.
+#     Uncomment this function and comment out the model version above when workflow is ready.
+#     """
+#     api_key = os.getenv("ROBOFLOW_API_KEY", "").strip()
+#     workspace = os.getenv("ROBOFLOW_WORKSPACE", "").strip()
+#     workflow_id = os.getenv("ROBOFLOW_WORKFLOW_ID", "").strip()
+#     api_url = os.getenv("ROBOFLOW_API_URL", "https://serverless.roboflow.com").strip().rstrip("/")
+#
+#     if not api_key or not workspace or not workflow_id:
+#         raise RuntimeError(
+#             "Missing Roboflow env vars. Need ROBOFLOW_API_KEY, ROBOFLOW_WORKSPACE, ROBOFLOW_WORKFLOW_ID."
+#         )
+#
+#     # Workflows endpoint
+#     url = f"{api_url}/infer/workflows/{workspace}/{workflow_id}"
+#     b64 = base64.b64encode(image_bytes).decode("utf-8")
+#     payload = {
+#         "api_key": api_key,
+#         "inputs": {
+#             "image": {"type": "base64", "value": b64}
+#         },
+#     }
+#
+#     r = requests.post(url, json=payload, timeout=45)
+#     if r.status_code != 200:
+#         raise RuntimeError(f"Roboflow error {r.status_code}: {r.text}")
+#     return r.json()
 
 
 # ---------------------------
@@ -187,6 +247,15 @@ def pred_class(p: Dict[str, Any]) -> str:
         if k in p and isinstance(p[k], str):
             return p[k]
     return "wound"
+
+
+def bbox_area_of_pred(p: Dict[str, Any], img_w: int, img_h: int) -> float:
+    """Calculate bounding box area for a prediction."""
+    bb = parse_bbox(p, img_w, img_h)
+    if not bb:
+        return 0.0
+    x1, y1, x2, y2 = bb
+    return float((x2 - x1) * (y2 - y1))
 
 
 def parse_bbox(p: Dict[str, Any], img_w: int, img_h: int) -> Optional[Tuple[int, int, int, int]]:
@@ -563,10 +632,159 @@ async def predict(
     image: UploadFile = File(...),
     debug: bool = Query(False),
 ):
+    logger.info("="*80)
+    logger.info(f"📥 POST /predict - File: {image.filename}, Debug: {debug}")
+    logger.info("="*80)
     try:
         image_bytes = await image.read()
+        logger.info(f"📷 Image read: {len(image_bytes)} bytes")
         pil_img, infer_bytes = preprocess_image(image_bytes, max_side=MAX_IMAGE_SIDE)
+        logger.info(f"🖼️ Preprocessed to {pil_img.size[0]}x{pil_img.size[1]}")
 
+        # Use comprehensive wound analyzer if available
+        if analyze_wound_image is not None:
+            try:
+                logger.info("Running comprehensive wound analysis...")
+                
+                # FIRST: Get Roboflow predictions for bounding box
+                rf_json = roboflow_workflow_infer(infer_bytes)
+                pred_lists = extract_prediction_lists(rf_json)
+                all_preds: List[Dict[str, Any]] = []
+                for lst in pred_lists:
+                    for p in lst:
+                        if isinstance(p, dict) and pred_conf(p) > 0:
+                            all_preds.append(p)
+                
+                # Prefer wound-ish classes
+                wound_preds = [p for p in all_preds if pred_class(p).lower() in ["wound", "abrasion", "cut", "laceration"]]
+                candidates = wound_preds if wound_preds else all_preds
+                
+                # Get best prediction bbox
+                roboflow_bbox = None
+                roboflow_conf = 0.0
+                if candidates:
+                    img_w, img_h = pil_img.size
+                    candidates_sorted = sorted(candidates, key=lambda p: (pred_conf(p), bbox_area_of_pred(p, img_w, img_h)), reverse=True)
+                    best = candidates_sorted[0]
+                    roboflow_conf = pred_conf(best)
+                    roboflow_bbox = parse_bbox(best, img_w, img_h)
+                    logger.info(f"✓ Roboflow detected wound with {roboflow_conf:.1%} confidence")
+                
+                # Save image temporarily for analysis
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
+                    tmp_path = tmp_file.name
+                    pil_img.save(tmp_path, format='JPEG', quality=95)
+                
+                # Create temp output directory for visual
+                temp_output_dir = tempfile.mkdtemp()
+                
+                # Run comprehensive wound analysis (generates visual output)
+                analysis_result = analyze_wound_image(
+                    tmp_path,
+                    pixels_per_cm=150.0,
+                    save_visual=False,  # We'll create our own visual with Roboflow bbox
+                    output_dir=temp_output_dir
+                )
+                
+                # Create annotated image with Roboflow bounding box
+                annotated_image_b64 = None
+                if roboflow_bbox:
+                    try:
+                        import cv2
+                        import numpy as np
+                        # Load original image
+                        img_np = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+                        x1, y1, x2, y2 = roboflow_bbox
+                        
+                        # Draw green bounding box
+                        cv2.rectangle(img_np, (x1, y1), (x2, y2), (0, 255, 0), 3)
+                        
+                        # Add measurements text
+                        measurements = analysis_result.get("measurements", {})
+                        length = measurements.get("length_cm", 0)
+                        width = measurements.get("width_cm", 0)
+                        area = measurements.get("area_cm2", 0)
+                        text = f"LxW: {length:.1f}x{width:.1f} cm  |  Area: {area:.1f} cm^2"
+                        
+                        # Put text below the box
+                        text_y = min(img_np.shape[0] - 10, y2 + 30)
+                        cv2.putText(img_np, text, (x1, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                        
+                        # Encode to base64
+                        _, buffer = cv2.imencode('.jpg', img_np)
+                        annotated_image_b64 = base64.b64encode(buffer).decode("utf-8")
+                        logger.info(f"✓ Created annotated image with Roboflow bbox")
+                    except Exception as e:
+                        logger.error(f"Failed to create annotated image: {e}")
+                
+                # Clean up temp files
+                try:
+                    os.unlink(tmp_path)
+                    if os.path.exists(temp_output_dir):
+                        # Try to remove directory - may not be empty
+                        try:
+                            os.rmdir(temp_output_dir)
+                        except:
+                            import shutil
+                            shutil.rmtree(temp_output_dir, ignore_errors=True)
+                except Exception as e:
+                    logger.warning(f"Cleanup warning: {e}")
+                
+                # Check if wound was detected
+                if not analysis_result.get("wound_detected", False):
+                    return JSONResponse(
+                        status_code=200,
+                        content={
+                            "ok": True,
+                            "detected": False,
+                            "confidence": analysis_result.get("confidence", 0.0),
+                            "message": "No wound detected. Retake with better light and focus.",
+                            "min_confidence": MIN_CONFIDENCE,
+                            "analysis": analysis_result if debug else None,
+                        },
+                    )
+                
+                conf = analysis_result.get("confidence", 0.0)
+                measurements = analysis_result.get("measurements", {})
+                color_analysis = analysis_result.get("color_analysis", {})
+                healing_assessment = analysis_result.get("healing_assessment", {})
+                
+                # Also get the heuristic assessment for additional context
+                bbox = (0, 0, pil_img.width, pil_img.height)  # Default bbox
+                heuristic_assessment = compute_wound_assessment(pil_img, bbox, None, conf=conf)
+                
+                # Combine comprehensive analysis with assessment
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "ok": True,
+                        "detected": True,
+                        "confidence": conf,
+                        "method": analysis_result.get("method", "Computer Vision"),
+                        "annotated_image": annotated_image_b64,  # Base64 encoded annotated image
+                        "measurements": {
+                            "length_cm": measurements.get("length_cm", 0),
+                            "width_cm": measurements.get("width_cm", 0),
+                            "area_cm2": measurements.get("area_cm2", 0),
+                            "perimeter_cm": measurements.get("perimeter_cm", 0),
+                        },
+                        "color_analysis": color_analysis,
+                        "healing_assessment": healing_assessment,
+                        "overall_assessment": analysis_result.get("overall_assessment", ""),
+                        "recommendations": analysis_result.get("recommendations", {}),
+                        "assessment": heuristic_assessment,  # Includes urgency and care tips
+                        "pixels_per_cm": analysis_result.get("pixels_per_cm", 45.0),
+                        "calibration": analysis_result.get("calibration", {}),
+                        "min_confidence": MIN_CONFIDENCE,
+                        "debug": analysis_result if debug else None,
+                    },
+                )
+                
+            except Exception as e:
+                logger.warning(f"Comprehensive analysis failed ({e}), falling back to Roboflow only")
+                # Fall through to original Roboflow workflow below
+        
+        # Original Roboflow workflow logic (fallback or when analyzer not available)
         rf_json = roboflow_workflow_infer(infer_bytes)
         pred_lists = extract_prediction_lists(rf_json)
 
@@ -590,7 +808,7 @@ async def predict(
                     "ok": True,
                     "detected": False,
                     "confidence": 0.0,
-                    "message": "No predictions returned from the workflow.",
+                    "message": "No predictions returned from the model.",
                     "min_confidence": MIN_CONFIDENCE,
                     "debug": rf_json if debug else None,
                 },
@@ -661,3 +879,5 @@ async def predict(
     except Exception as e:
         logger.exception("Predict failed")
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+# ===== WOUND PROFILE MANAGEMENT ENDPOINTS =====
