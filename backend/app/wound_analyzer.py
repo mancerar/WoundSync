@@ -849,6 +849,15 @@ class WoundAnalyzer:
         area_cm2 = measurements.get("area_cm2", 0)
         length_cm = measurements.get("length_cm", 0)
         width_cm = measurements.get("width_cm", 0)
+
+        # --- Small wound safety gate ---
+        SMALL_WOUND_AREA_CM2 = 1.0
+        SMALL_WOUND_LENGTH_CM = 2.5
+
+        is_small_wound = (
+            area_cm2 < SMALL_WOUND_AREA_CM2 and
+            length_cm < SMALL_WOUND_LENGTH_CM
+        )
         
         if area_cm2 > 15:
             concerns.append("Very large wound area requiring specialized care")
@@ -878,15 +887,22 @@ class WoundAnalyzer:
             healing_indicators.append("Healthy pink coloration")
             healing_stage = "proliferative"
             healing_progress = "good"
+        
         elif "red" in color_desc:
+            healing_stage = "inflammatory"
+
             if redness > 0.8:
-                concerns.append("Excessive inflammation - possible infection")
-                healing_stage = "inflammatory"
-                healing_progress = "delayed"
-                severity = "severe"
+                concerns.append("Marked inflammation observed")
+
+                # Only escalate to severe if NOT a small wound
+                if not is_small_wound:
+                    severity = "severe"
+                    healing_progress = "delayed"
+                else:
+                    healing_progress = "normal"
+
             elif redness > 0.5:
                 healing_indicators.append("Moderate inflammation - normal healing response")
-                healing_stage = "inflammatory"
             else:
                 healing_indicators.append("Mild inflammation")
         
@@ -1155,6 +1171,17 @@ class WoundAnalyzer:
         width = float(measurements.get("width_cm", 0.0) or 0.0)
         redness = float(color_analysis.get("redness_level", 0.0) or 0.0)
         reasons = []
+
+        SMALL_WOUND_AREA_CM2 = 1.0
+        SMALL_WOUND_LENGTH_CM = 2.5
+        area = float(measurements.get("area_cm2", 0.0) or 0.0)
+
+        if area < SMALL_WOUND_AREA_CM2 and length < SMALL_WOUND_LENGTH_CM:
+            return {
+                "need_stitches": False,
+                "recommendation": "Small superficial wound — stitches not indicated",
+                "reasons": ["Small size without gaping"]
+            }
 
         # Slightly raised thresholds with a "require both" primary condition
         L_REQ = 3.0
