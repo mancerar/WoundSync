@@ -1,4 +1,3 @@
-// Progress comparison chart component
 "use client";
 
 import { useEffect, useState } from "react";
@@ -13,25 +12,35 @@ interface ChartData {
   record_count: number;
 }
 
-export function ProgressChart({ profileId }: { profileId: number }) {
+export function ProgressChart({ profileId }: { profileId: string }) {
   const [data, setData] = useState<ChartData | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeMetric, setActiveMetric] = useState<"area" | "infection" | "redness">("area");
 
   useEffect(() => {
     loadChartData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profileId]);
 
   async function loadChartData() {
     try {
       setLoading(true);
-      const response = await fetch(`http://127.0.0.1:8000/api/charts/metrics/${profileId}`);
+
+      // NOTE: keep it simple for now since you hardcoded it before
+      // (we can swap to env BACKEND_URL later)
+      const response = await fetch(
+        `http://127.0.0.1:8000/api/charts/metrics/${encodeURIComponent(profileId)}`
+      );
+
       const result = await response.json();
-      if (result.ok) {
-        setData(result.data);
+      if (result?.ok) {
+        setData(result.data as ChartData);
+      } else {
+        setData(null);
       }
     } catch (error) {
       console.error("Failed to load chart data:", error);
+      setData(null);
     } finally {
       setLoading(false);
     }
@@ -80,8 +89,7 @@ export function ProgressChart({ profileId }: { profileId: number }) {
   };
 
   const metricData = getMetricData();
-  const maxValue = Math.max(...metricData);
-  const minValue = Math.min(...metricData);
+  const maxValue = metricData.length ? Math.max(...metricData) : 0;
 
   return (
     <div className="ws-card p-5">
@@ -122,19 +130,19 @@ export function ProgressChart({ profileId }: { profileId: number }) {
       </div>
 
       <div className="mb-2 text-sm font-medium text-slate-600">{getMetricLabel()}</div>
-      
-      {/* Simple bar chart */}
+
       <div className="space-y-2">
         {data.dates.map((date, index) => {
           const value = metricData[index];
           const percentage = maxValue > 0 ? (value / maxValue) * 100 : 0;
           const isImproving = index > 0 && value < metricData[index - 1];
-          
+
           return (
             <div key={index} className="flex items-center gap-2">
               <div className="text-xs text-slate-500 w-24 flex-shrink-0">
                 {new Date(date).toLocaleDateString()}
               </div>
+
               <div className="flex-1 bg-slate-100 rounded-full h-8 relative overflow-hidden">
                 <div
                   className={`h-full transition-all ${
@@ -157,10 +165,16 @@ export function ProgressChart({ profileId }: { profileId: number }) {
                   style={{ width: `${percentage}%` }}
                 />
                 <div className="absolute inset-0 flex items-center px-3 text-xs font-medium">
-                  {activeMetric === "area" ? `${value.toFixed(2)} cm²` : 
-                   value === 1 ? "Low" : value === 2 ? "Moderate" : "High"}
+                  {activeMetric === "area"
+                    ? `${value.toFixed(2)} cm²`
+                    : value === 1
+                    ? "Low"
+                    : value === 2
+                    ? "Moderate"
+                    : "High"}
                 </div>
               </div>
+
               {index > 0 && (
                 <div className="text-xs w-16 flex-shrink-0 text-right">
                   {activeMetric === "area" ? (
@@ -173,38 +187,6 @@ export function ProgressChart({ profileId }: { profileId: number }) {
             </div>
           );
         })}
-      </div>
-
-      {/* Summary */}
-      <div className="mt-4 pt-4 border-t border-slate-200 grid grid-cols-3 gap-2 text-center">
-        <div>
-          <div className="text-xs text-slate-500">Start</div>
-          <div className="font-semibold text-slate-800">
-            {activeMetric === "area" 
-              ? `${metricData[0].toFixed(2)} cm²`
-              : metricData[0] === 1 ? "Low" : metricData[0] === 2 ? "Moderate" : "High"}
-          </div>
-        </div>
-        <div>
-          <div className="text-xs text-slate-500">Current</div>
-          <div className="font-semibold text-slate-800">
-            {activeMetric === "area"
-              ? `${metricData[metricData.length - 1].toFixed(2)} cm²`
-              : metricData[metricData.length - 1] === 1 ? "Low" : metricData[metricData.length - 1] === 2 ? "Moderate" : "High"}
-          </div>
-        </div>
-        <div>
-          <div className="text-xs text-slate-500">Change</div>
-          <div className={`font-semibold ${
-            activeMetric === "area" && metricData[0] > metricData[metricData.length - 1]
-              ? "text-green-600"
-              : "text-slate-800"
-          }`}>
-            {activeMetric === "area"
-              ? `${(metricData[0] - metricData[metricData.length - 1]).toFixed(2)} cm²`
-              : metricData[0] - metricData[metricData.length - 1] >= 0 ? "Improved" : "Worsened"}
-          </div>
-        </div>
       </div>
     </div>
   );

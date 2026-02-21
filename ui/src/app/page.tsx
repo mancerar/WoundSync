@@ -52,7 +52,8 @@ export default function Login() {
     */
     
     // Temporary local-only login (no Firebase)
-    setUser({ uid: email, email, username, displayName: username });
+    // Temporary local-only login (no Firebase)
+    setUser({ email, username });
     router.replace("/dashboard");
   }
 

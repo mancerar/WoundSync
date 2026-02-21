@@ -4,10 +4,98 @@ import React, { useMemo, useState } from "react";
 
 type PredictResponse = {
   ok: boolean;
+
+  // base flags
   detected?: boolean;
   confidence?: number;
   message?: string;
   class?: string;
+  error?: string;
+
+  // image overlay returned by backend (base64, no prefix)
+  annotated_image?: string;
+
+  // you display this in the UI
+  method?: string;
+
+  // measurements section in your UI
+  measurements?: {
+    length_cm?: number;
+    width_cm?: number;
+    area_cm2?: number;
+    perimeter_cm?: number;
+  };
+
+  // color analysis section in your UI
+  color_analysis?: {
+    color_description?: string;
+    redness_level?: number; // looks like 0..1 in your UI
+    color_percentages?: Record<string, number>;
+    health_indicators?: {
+      healthy_pink_present?: boolean;
+      excessive_redness?: boolean;
+      signs_of_infection?: boolean;
+      necrotic_tissue?: boolean;
+    };
+  };
+
+  // healing assessment section in your UI
+  healing_assessment?: {
+    healing_stage?: string;
+    healing_progress?: string;
+    severity?: string;
+
+    healing_indicators?: string[];
+    concerns?: string[];
+
+    infection_risk?: {
+      level?: string;
+      score?: number;
+    };
+
+    healing_time_prediction?: {
+      predicted_days_min?: number;
+      predicted_days_max?: number;
+      confidence?: string;
+      notes?: string;
+    };
+
+    stitches?: {
+      need_stitches?: boolean;
+      recommendation?: string;
+    };
+
+    scar_risk?: {
+      risk?: string;
+      score?: number;
+      tips?: string[];
+    };
+  };
+
+  // recommendations section in your UI
+  recommendations?: {
+    immediate_care?: string[];
+    ongoing_care?: string[];
+    medications?: {
+      healing_aids?: string[];
+      pain_management?: string[];
+      cautions?: string[];
+    };
+    warning_signs?: string[];
+    follow_up?: string;
+  };
+
+  // overall assessment section in your UI
+  overall_assessment?: string;
+
+  // calibration section in your UI
+  calibration?: {
+    mode?: string;
+    ppcm?: number;
+  };
+  pixels_per_cm?: number;
+
+  // keep your older assessment block too (doesn't hurt)
   assessment?: {
     summary: string;
     urgency: "home" | "soon" | "urgent";
@@ -20,7 +108,6 @@ type PredictResponse = {
     quality?: any;
     context?: any;
   };
-  error?: string;
 };
 
 const BACKEND_URL =
@@ -31,6 +118,23 @@ export default function CapturePage() {
   const [previewUrl, setPreviewUrl] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<PredictResponse | null>(null);
+
+  // ---- TS-safe "narrowed" locals (prevents build errors) ----
+  const measurements = result?.measurements;
+  const color = result?.color_analysis;
+  const healing = result?.healing_assessment;
+  const recs = result?.recommendations;
+
+  const healingIndicators = healing?.healing_indicators ?? [];
+  const concerns = healing?.concerns ?? [];
+  const scarTips = healing?.scar_risk?.tips ?? [];
+
+  const immediateCare = recs?.immediate_care ?? [];
+  const ongoingCare = recs?.ongoing_care ?? [];
+  const warningSigns = recs?.warning_signs ?? [];
+
+  const rednessLevel = color?.redness_level ?? 0;
+  const perimeter = measurements?.perimeter_cm ?? 0;
 
   const urgencyLabel = useMemo(() => {
     const u = result?.assessment?.urgency;
@@ -91,9 +195,10 @@ export default function CapturePage() {
     <div style={{ padding: 24, maxWidth: 1100, margin: "0 auto" }}>
       <h2 style={{ marginBottom: 6 }}>Wound Check (Image Only)</h2>
       <div style={{ color: "#666", marginBottom: 14 }}>
-        Upload a photo. Guidance is based on shape + visual cues (not “size in photo”),
-        so zoomed-in papercuts won’t automatically be treated as severe.
+        Upload a photo. Guidance is based on shape + visual cues (not “size in
+        photo”), so zoomed-in papercuts won’t automatically be treated as severe.
       </div>
+
       {/* Photo Taking Tips */}
       <div
         style={{
@@ -111,13 +216,19 @@ export default function CapturePage() {
           <li>Hold your device steady (rest your hand on a stable surface)</li>
           <li>Use good lighting - natural daylight works best</li>
           <li>Tap to focus on the wound before taking the photo</li>
-          <li>Avoid glare - wipe moisture and tilt slightly so light doesn't reflect off shiny skin</li>
+          <li>
+            Avoid glare - wipe moisture and tilt slightly so light doesn't
+            reflect off shiny skin
+          </li>
           <li>Keep the wound centered in the frame</li>
-          <li>Don't zoom in too much - include some surrounding skin for context</li>
+          <li>
+            Don't zoom in too much - include some surrounding skin for context
+          </li>
           <li>Take the photo from directly above the wound (perpendicular)</li>
           <li>Ensure the wound is clean and visible before photographing</li>
         </ul>
       </div>
+
       <div
         style={{
           display: "flex",
@@ -200,7 +311,7 @@ export default function CapturePage() {
           {previewUrl ? (
             <img
               src={
-                result?.annotated_image 
+                result?.annotated_image
                   ? `data:image/jpeg;base64,${result.annotated_image}`
                   : previewUrl
               }
@@ -271,48 +382,72 @@ export default function CapturePage() {
               )}
 
               {/* Measurements */}
-              {result.measurements && (
+              {measurements && (
                 <>
-                  <div style={{ marginTop: 14, fontWeight: 800, fontSize: 16 }}>📏 Measurements</div>
+                  <div style={{ marginTop: 14, fontWeight: 800, fontSize: 16 }}>
+                    📏 Measurements
+                  </div>
                   <div style={{ marginTop: 6, paddingLeft: 10 }}>
-                    <div>Length: {result.measurements.length_cm?.toFixed(2) || 'N/A'} cm</div>
-                    <div>Width: {result.measurements.width_cm?.toFixed(2) || 'N/A'} cm</div>
-                    <div>Area: {result.measurements.area_cm2?.toFixed(2) || 'N/A'} cm²</div>
-                    {result.measurements.perimeter_cm > 0 && (
-                      <div>Perimeter: {result.measurements.perimeter_cm?.toFixed(2)} cm</div>
+                    <div>
+                      Length: {measurements.length_cm?.toFixed(2) || "N/A"} cm
+                    </div>
+                    <div>
+                      Width: {measurements.width_cm?.toFixed(2) || "N/A"} cm
+                    </div>
+                    <div>
+                      Area: {measurements.area_cm2?.toFixed(2) || "N/A"} cm²
+                    </div>
+                    {perimeter > 0 && (
+                      <div>Perimeter: {perimeter.toFixed(2)} cm</div>
                     )}
                   </div>
                 </>
               )}
 
               {/* Color Analysis */}
-              {result.color_analysis && (
+              {color && (
                 <>
-                  <div style={{ marginTop: 14, fontWeight: 800, fontSize: 16 }}>🎨 Color Analysis</div>
+                  <div style={{ marginTop: 14, fontWeight: 800, fontSize: 16 }}>
+                    🎨 Color Analysis
+                  </div>
                   <div style={{ marginTop: 6, paddingLeft: 10 }}>
-                    <div>Description: {result.color_analysis.color_description}</div>
-                    <div>Redness Level: {(result.color_analysis.redness_level * 100).toFixed(1)}%</div>
-                    {result.color_analysis.color_percentages && (
+                    <div>Description: {color.color_description}</div>
+                    <div>Redness Level: {(rednessLevel * 100).toFixed(1)}%</div>
+
+                    {color.color_percentages && (
                       <div style={{ marginTop: 4 }}>
-                        {Object.entries(result.color_analysis.color_percentages).map(([color, pct]: any) => (
-                          <div key={color}>- {color}: {pct.toFixed(1)}%</div>
-                        ))}
+                        {Object.entries(color.color_percentages).map(
+                          ([cname, pct]) => (
+                            <div key={cname}>
+                              - {cname}: {pct.toFixed(1)}%
+                            </div>
+                          )
+                        )}
                       </div>
                     )}
-                    {result.color_analysis.health_indicators && (
+
+                    {color.health_indicators && (
                       <div style={{ marginTop: 6 }}>
                         <div style={{ fontWeight: 700 }}>Health Indicators:</div>
-                        {result.color_analysis.health_indicators.healthy_pink_present && (
-                          <div style={{ color: '#1b6e1b' }}>✅ Healthy Pink Present</div>
+                        {color.health_indicators.healthy_pink_present && (
+                          <div style={{ color: "#1b6e1b" }}>
+                            ✅ Healthy Pink Present
+                          </div>
                         )}
-                        {result.color_analysis.health_indicators.excessive_redness && (
-                          <div style={{ color: '#b36b00' }}>⚠️ Excessive Redness</div>
+                        {color.health_indicators.excessive_redness && (
+                          <div style={{ color: "#b36b00" }}>
+                            ⚠️ Excessive Redness
+                          </div>
                         )}
-                        {result.color_analysis.health_indicators.signs_of_infection && (
-                          <div style={{ color: '#b00020' }}>⚠️ Signs Of Infection</div>
+                        {color.health_indicators.signs_of_infection && (
+                          <div style={{ color: "#b00020" }}>
+                            ⚠️ Signs Of Infection
+                          </div>
                         )}
-                        {result.color_analysis.health_indicators.necrotic_tissue && (
-                          <div style={{ color: '#b00020' }}>⚠️ Necrotic Tissue</div>
+                        {color.health_indicators.necrotic_tissue && (
+                          <div style={{ color: "#b00020" }}>
+                            ⚠️ Necrotic Tissue
+                          </div>
                         )}
                       </div>
                     )}
@@ -321,77 +456,106 @@ export default function CapturePage() {
               )}
 
               {/* Healing Assessment */}
-              {result.healing_assessment && (
+              {healing && (
                 <>
-                  <div style={{ marginTop: 14, fontWeight: 800, fontSize: 16 }}>🔄 Healing Assessment</div>
+                  <div style={{ marginTop: 14, fontWeight: 800, fontSize: 16 }}>
+                    🔄 Healing Assessment
+                  </div>
                   <div style={{ marginTop: 6, paddingLeft: 10 }}>
-                    <div>Stage: {result.healing_assessment.healing_stage?.toUpperCase()}</div>
-                    <div>Progress: {result.healing_assessment.healing_progress?.toUpperCase()}</div>
-                    <div>Severity: {result.healing_assessment.severity?.toUpperCase()}</div>
-                    
-                    {result.healing_assessment.healing_indicators?.length > 0 && (
+                    <div>
+                      Stage: {healing.healing_stage?.toUpperCase()}
+                    </div>
+                    <div>
+                      Progress: {healing.healing_progress?.toUpperCase()}
+                    </div>
+                    <div>
+                      Severity: {healing.severity?.toUpperCase()}
+                    </div>
+
+                    {healingIndicators.length > 0 && (
                       <div style={{ marginTop: 6 }}>
                         <div style={{ fontWeight: 700 }}>Positive Signs:</div>
                         <ul style={{ marginTop: 2 }}>
-                          {result.healing_assessment.healing_indicators.map((sign: string, i: number) => (
+                          {healingIndicators.map((sign: string, i: number) => (
                             <li key={`hi-${i}`}>{sign}</li>
                           ))}
                         </ul>
                       </div>
                     )}
 
-                    {result.healing_assessment.concerns?.length > 0 && (
+                    {concerns.length > 0 && (
                       <div style={{ marginTop: 6 }}>
                         <div style={{ fontWeight: 700 }}>Concerns:</div>
                         <ul style={{ marginTop: 2 }}>
-                          {result.healing_assessment.concerns.map((concern: string, i: number) => (
+                          {concerns.map((concern: string, i: number) => (
                             <li key={`c-${i}`}>{concern}</li>
                           ))}
                         </ul>
                       </div>
                     )}
-                    
-                    {result.healing_assessment.infection_risk && (
+
+                    {healing.infection_risk && (
                       <div style={{ marginTop: 6 }}>
-                        Infection Likelihood: {result.healing_assessment.infection_risk.level?.toUpperCase()} ({result.healing_assessment.infection_risk.score}%)
+                        Infection Likelihood:{" "}
+                        {healing.infection_risk.level?.toUpperCase()} (
+                        {healing.infection_risk.score}%)
                       </div>
                     )}
 
-                    {result.healing_assessment.healing_time_prediction && (
+                    {healing.healing_time_prediction && (
                       <div style={{ marginTop: 6 }}>
-                        <div style={{ fontWeight: 700 }}>Healing Time Prediction:</div>
-                        <div>Estimated: {result.healing_assessment.healing_time_prediction.predicted_days_min}–{result.healing_assessment.healing_time_prediction.predicted_days_max} days</div>
-                        <div style={{ fontSize: 13, color: '#666' }}>
-                          Confidence: {result.healing_assessment.healing_time_prediction.confidence}
+                        <div style={{ fontWeight: 700 }}>
+                          Healing Time Prediction:
                         </div>
-                        {result.healing_assessment.healing_time_prediction.notes && (
-                          <div style={{ fontSize: 13, color: '#666', fontStyle: 'italic' }}>
-                            {result.healing_assessment.healing_time_prediction.notes}
+                        <div>
+                          Estimated:{" "}
+                          {healing.healing_time_prediction.predicted_days_min}–
+                          {healing.healing_time_prediction.predicted_days_max}{" "}
+                          days
+                        </div>
+                        <div style={{ fontSize: 13, color: "#666" }}>
+                          Confidence:{" "}
+                          {healing.healing_time_prediction.confidence}
+                        </div>
+                        {healing.healing_time_prediction.notes && (
+                          <div
+                            style={{
+                              fontSize: 13,
+                              color: "#666",
+                              fontStyle: "italic",
+                            }}
+                          >
+                            {healing.healing_time_prediction.notes}
                           </div>
                         )}
                       </div>
                     )}
 
-                    {result.healing_assessment.stitches && (
+                    {healing.stitches && (
                       <div style={{ marginTop: 6 }}>
-                        {result.healing_assessment.stitches.need_stitches ? (
-                          <div style={{ color: '#b00020', fontWeight: 700 }}>
-                            ⚠️ {result.healing_assessment.stitches.recommendation}
+                        {healing.stitches.need_stitches ? (
+                          <div style={{ color: "#b00020", fontWeight: 700 }}>
+                            ⚠️ {healing.stitches.recommendation}
                           </div>
                         ) : (
-                          <div style={{ color: '#1b6e1b', fontWeight: 700 }}>
-                            ✅ Closure: {result.healing_assessment.stitches.recommendation || 'LIKELY HEALS NATURALLY'}
+                          <div style={{ color: "#1b6e1b", fontWeight: 700 }}>
+                            ✅ Closure:{" "}
+                            {healing.stitches.recommendation ||
+                              "LIKELY HEALS NATURALLY"}
                           </div>
                         )}
                       </div>
                     )}
 
-                    {result.healing_assessment.scar_risk && (
+                    {healing.scar_risk && (
                       <div style={{ marginTop: 6 }}>
-                        <div style={{ fontWeight: 700 }}>Scar Risk: {result.healing_assessment.scar_risk.risk?.toUpperCase()} ({result.healing_assessment.scar_risk.score}%)</div>
-                        {result.healing_assessment.scar_risk.tips?.length > 0 && (
+                        <div style={{ fontWeight: 700 }}>
+                          Scar Risk: {healing.scar_risk.risk?.toUpperCase()} (
+                          {healing.scar_risk.score}%)
+                        </div>
+                        {scarTips.length > 0 && (
                           <ul style={{ marginTop: 2, fontSize: 13 }}>
-                            {result.healing_assessment.scar_risk.tips.map((tip: string, i: number) => (
+                            {scarTips.map((tip: string, i: number) => (
                               <li key={`scar-${i}`}>{tip}</li>
                             ))}
                           </ul>
@@ -403,68 +567,95 @@ export default function CapturePage() {
               )}
 
               {/* Recommendations */}
-              {result.recommendations && (
+              {recs && (
                 <>
-                  <div style={{ marginTop: 14, fontWeight: 800, fontSize: 16 }}>💊 Treatment Recommendations</div>
-                  
-                  {result.recommendations.immediate_care?.length > 0 && (
+                  <div style={{ marginTop: 14, fontWeight: 800, fontSize: 16 }}>
+                    💊 Treatment Recommendations
+                  </div>
+
+                  {immediateCare.length > 0 && (
                     <>
-                      <div style={{ marginTop: 8, fontWeight: 700 }}>Immediate Care:</div>
+                      <div style={{ marginTop: 8, fontWeight: 700 }}>
+                        Immediate Care:
+                      </div>
                       <ul style={{ marginTop: 4 }}>
-                        {result.recommendations.immediate_care.map((step: string, i: number) => (
+                        {immediateCare.map((step: string, i: number) => (
                           <li key={`ic-${i}`}>{step}</li>
                         ))}
                       </ul>
                     </>
                   )}
 
-                  {result.recommendations.ongoing_care?.length > 0 && (
+                  {ongoingCare.length > 0 && (
                     <>
-                      <div style={{ marginTop: 8, fontWeight: 700 }}>Daily Care Protocol:</div>
+                      <div style={{ marginTop: 8, fontWeight: 700 }}>
+                        Daily Care Protocol:
+                      </div>
                       <ul style={{ marginTop: 4 }}>
-                        {result.recommendations.ongoing_care.map((step: string, i: number) => (
+                        {ongoingCare.map((step: string, i: number) => (
                           <li key={`oc-${i}`}>{step}</li>
                         ))}
                       </ul>
                     </>
                   )}
 
-                  {result.recommendations.medications && (
+                  {recs.medications && (
                     <>
-                      <div style={{ marginTop: 8, fontWeight: 700 }}>Medications:</div>
+                      <div style={{ marginTop: 8, fontWeight: 700 }}>
+                        Medications:
+                      </div>
                       <div style={{ paddingLeft: 10, marginTop: 4 }}>
-                        {result.recommendations.medications.healing_aids?.map((med: string, i: number) => (
-                          <div key={`ha-${i}`} style={{ marginTop: 2 }}>• {med}</div>
-                        ))}
-                        {result.recommendations.medications.pain_management?.map((med: string, i: number) => (
-                          <div key={`pm-${i}`} style={{ marginTop: 2 }}>• {med}</div>
-                        ))}
-                        {result.recommendations.medications.cautions && (
+                        {recs.medications.healing_aids?.map(
+                          (med: string, i: number) => (
+                            <div key={`ha-${i}`} style={{ marginTop: 2 }}>
+                              • {med}
+                            </div>
+                          )
+                        )}
+                        {recs.medications.pain_management?.map(
+                          (med: string, i: number) => (
+                            <div key={`pm-${i}`} style={{ marginTop: 2 }}>
+                              • {med}
+                            </div>
+                          )
+                        )}
+                        {(recs.medications.cautions ?? []).length > 0 && (
                           <>
-                            <div style={{ marginTop: 6, fontWeight: 700 }}>Cautions:</div>
-                            {result.recommendations.medications.cautions.map((caution: string, i: number) => (
-                              <div key={`caut-${i}`} style={{ marginTop: 2 }}>• {caution}</div>
-                            ))}
+                            <div style={{ marginTop: 6, fontWeight: 700 }}>
+                              Cautions:
+                            </div>
+                            {(recs.medications.cautions ?? []).map(
+                              (caution: string, i: number) => (
+                                <div
+                                  key={`caut-${i}`}
+                                  style={{ marginTop: 2 }}
+                                >
+                                  • {caution}
+                                </div>
+                              )
+                            )}
                           </>
                         )}
                       </div>
                     </>
                   )}
 
-                  {result.recommendations.warning_signs?.length > 0 && (
+                  {warningSigns.length > 0 && (
                     <>
-                      <div style={{ marginTop: 8, fontWeight: 700 }}>⚠️ Warning Signs:</div>
+                      <div style={{ marginTop: 8, fontWeight: 700 }}>
+                        ⚠️ Warning Signs:
+                      </div>
                       <ul style={{ marginTop: 4 }}>
-                        {result.recommendations.warning_signs.map((sign: string, i: number) => (
+                        {warningSigns.map((sign: string, i: number) => (
                           <li key={`ws-${i}`}>{sign}</li>
                         ))}
                       </ul>
                     </>
                   )}
 
-                  {result.recommendations.follow_up && (
-                    <div style={{ marginTop: 8, color: '#666' }}>
-                      Follow-up: {result.recommendations.follow_up}
+                  {recs.follow_up && (
+                    <div style={{ marginTop: 8, color: "#666" }}>
+                      Follow-up: {recs.follow_up}
                     </div>
                   )}
                 </>
@@ -472,7 +663,15 @@ export default function CapturePage() {
 
               {/* Overall Assessment */}
               {result.overall_assessment && (
-                <div style={{ marginTop: 14, padding: 10, background: '#f5f5f5', borderRadius: 8, borderLeft: '4px solid #2b59ff' }}>
+                <div
+                  style={{
+                    marginTop: 14,
+                    padding: 10,
+                    background: "#f5f5f5",
+                    borderRadius: 8,
+                    borderLeft: "4px solid #2b59ff",
+                  }}
+                >
                   <div style={{ fontWeight: 700 }}>Clinical Summary:</div>
                   <div style={{ marginTop: 4 }}>{result.overall_assessment}</div>
                 </div>
@@ -480,10 +679,30 @@ export default function CapturePage() {
 
               {/* Calibration Info */}
               {result.calibration && (
-                <div style={{ marginTop: 14, fontSize: 13, color: '#666', padding: 8, background: '#f9f9f9', borderRadius: 6 }}>
+                <div
+                  style={{
+                    marginTop: 14,
+                    fontSize: 13,
+                    color: "#666",
+                    padding: 8,
+                    background: "#f9f9f9",
+                    borderRadius: 6,
+                  }}
+                >
                   <div style={{ fontWeight: 700 }}>📐 Calibration:</div>
-                  <div>Mode: {result.calibration.mode || 'Standard'}</div>
-                  <div>Pixels per cm: {result.pixels_per_cm || result.calibration.ppcm || 'N/A'}</div>
+                  <div>Mode: {result.calibration.mode || "Standard"}</div>
+                  <div>
+                    Pixels per cm:{" "}
+                    {result.pixels_per_cm ?? result.calibration.ppcm ?? "N/A"}
+                  </div>
+                </div>
+              )}
+
+              {/* Optional: your older assessment urgency label if backend sends it */}
+              {result.assessment?.urgency && (
+                <div style={{ marginTop: 14 }}>
+                  <div style={{ fontWeight: 700 }}>Urgency:</div>
+                  <div style={{ color: urgencyColor }}>{urgencyLabel}</div>
                 </div>
               )}
             </div>

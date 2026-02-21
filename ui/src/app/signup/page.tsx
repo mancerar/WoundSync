@@ -49,7 +49,7 @@ export default function Signup() {
     */
     
     // Temporary local-only signup (no Firebase)
-    setUser({ uid: email, email, username, displayName: username });
+    setUser({ email, username });
     alert("Account created successfully! Welcome to WoundSync.");
     router.replace("/dashboard");
   }
