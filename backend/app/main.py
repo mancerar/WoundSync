@@ -48,12 +48,21 @@ app.include_router(charts_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
+        "http://localhost:3000/",
+        "http://127.0.0.1:3000/",
+
+        # Capacitor / iOS WebView origins:
+        "capacitor://localhost",
+        "ionic://localhost",
+        "http://localhost/",
+        "http://localhost:8100/",
+
+        # Your LAN UI (optional, if you ever run UI on LAN):
+        "http://192.168.86.33:3000/",
     ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=[""],
+    allow_headers=[""],
 )
 
 
