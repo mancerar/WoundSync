@@ -7,7 +7,7 @@ import tempfile
 import boto3
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from boto3.dynamodb.conditions import Key
 
 
@@ -677,7 +677,7 @@ def generate_upload_url(
     if not isinstance(content_type, str) or not content_type.strip():
         content_type = "image/jpeg"
     content_type = content_type.strip()
-    key = f"{uid}/{wound_id}/{datetime.now(UTC).isoformat()}.jpg"
+    key = f"{uid}/{wound_id}/{datetime.now(timezone.utc).isoformat()}.jpg"
 
     upload_url = s3.generate_presigned_url(
         "put_object",
@@ -751,7 +751,7 @@ def create_wound_profile(
         name = (body.name if body else None) or "New wound"
         slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in name.strip())[:50] or "wound"
         wound_id = f"{slug}-{uuid.uuid4().hex[:8]}"
-        ts = datetime.now(UTC).isoformat()
+        ts = datetime.now(timezone.utc).isoformat()
         sk_value = f"WOUND#{wound_id}#PROFILE"
 
         item = {
