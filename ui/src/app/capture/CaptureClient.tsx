@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { processAndUploadWound, predictOnly } from "@/lib/wounds";
@@ -114,7 +114,7 @@ type PredictResponse = {
 };
 
 const BACKEND_URL =
-  process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
+  process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8001";
 
 
 export default function CapturePage() {
@@ -124,6 +124,18 @@ export default function CapturePage() {
   const [previewUrl, setPreviewUrl] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<PredictResponse | null>(null);
+
+  // Follow-Up Chat state
+  type ChatMsg = { role: "user" | "assistant"; content: string; model?: string; source?: string };
+  const [chatMessages, setChatMessages] = useState<ChatMsg[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll chat to bottom on new messages
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages]);
 
   // ---- TS-safe "narrowed" locals (prevents build errors) ----
   const measurements = result?.measurements;
@@ -201,10 +213,39 @@ export default function CapturePage() {
     }
   };
 
+  const sendChat = async () => {
+    const q = chatInput.trim();
+    if (!q || chatLoading) return;
+    const userMsg: ChatMsg = { role: "user", content: q };
+    const updatedHistory = [...chatMessages, userMsg];
+    setChatMessages(updatedHistory);
+    setChatInput("");
+    setChatLoading(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          question: q,
+          wound_context: result ?? undefined,
+          history: chatMessages,
+        }),
+      });
+      const data = await res.json();
+      const answer = data.answer || "Sorry, I couldn't generate a response.";
+      setChatMessages([...updatedHistory, { role: "assistant", content: answer, model: data.model, source: data.source }]);
+    } catch {
+      setChatMessages([...updatedHistory, { role: "assistant", content: "Connection error — please try again." }]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
+
   const onClear = () => {
     setFile(null);
     setPreviewUrl("");
     setResult(null);
+    setChatMessages([]);
   };
 
   return (
@@ -765,6 +806,165 @@ export default function CapturePage() {
           )}
         </div>
       </div>
+      {/* ── Follow Up Questions ─────────────────────────────────────────── */}
+      {result && result.ok && result.detected === true && (
+        <div
+          style={{
+            marginTop: 24,
+            border: "1px solid #c7d2fe",
+            borderRadius: 14,
+            background: "#f8f9ff",
+            overflow: "hidden",
+          }}
+        >
+          {/* Header */}
+          <div
+            style={{
+              padding: "14px 18px",
+              background: "#eef2ff",
+              borderBottom: "1px solid #c7d2fe",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+            }}
+          >
+            <span style={{ fontSize: 20 }}>💬</span>
+            <div>
+              <div style={{ fontWeight: 800, fontSize: 16, color: "#3730a3" }}>
+                Follow Up Questions
+              </div>
+              <div style={{ fontSize: 12, color: "#6366f1" }}>
+                Ask the AI about your wound, care steps, healing time, or any concerns
+              </div>
+            </div>
+          </div>
+
+          {/* Message thread */}
+          <div
+            style={{
+              padding: "14px 18px",
+              maxHeight: 380,
+              overflowY: "auto",
+              display: "flex",
+              flexDirection: "column",
+              gap: 12,
+            }}
+          >
+            {chatMessages.length === 0 && (
+              <div style={{ color: "#888", fontSize: 13, fontStyle: "italic" }}>
+                No messages yet. Ask anything — "How do I clean this wound?", "Should I be worried about infection?", "What pain relief can I take?", or any other question.
+              </div>
+            )}
+
+            {chatMessages.map((msg, i) => (
+              <div
+                key={i}
+                style={{
+                  display: "flex",
+                  justifyContent: msg.role === "user" ? "flex-end" : "flex-start",
+                }}
+              >
+                <div
+                  style={{
+                    maxWidth: "78%",
+                    padding: "10px 14px",
+                    borderRadius: msg.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px",
+                    background: msg.role === "user" ? "#3730a3" : "#fff",
+                    color: msg.role === "user" ? "#fff" : "#1e1b4b",
+                    border: msg.role === "assistant" ? "1px solid #c7d2fe" : "none",
+                    fontSize: 14,
+                    lineHeight: 1.6,
+                    whiteSpace: "pre-wrap",
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.08)",
+                  }}
+                >
+                  {msg.role === "assistant" && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                      <span style={{ fontSize: 11, fontWeight: 700, color: "#6366f1" }}>WoundSync AI</span>
+                      {msg.model && (
+                        <span style={{ fontSize: 10, background: "#e0e7ff", color: "#4338ca", padding: "1px 6px", borderRadius: 8, fontWeight: 600 }}>
+                          {msg.model}
+                        </span>
+                      )}
+                      {!msg.model && msg.source && (
+                        <span style={{ fontSize: 10, background: "#f3f4f6", color: "#6b7280", padding: "1px 6px", borderRadius: 8, fontWeight: 600 }}>
+                          analysis-based
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {msg.content}
+                </div>
+              </div>
+            ))}
+
+            {chatLoading && (
+              <div style={{ display: "flex", justifyContent: "flex-start" }}>
+                <div
+                  style={{
+                    padding: "10px 14px",
+                    borderRadius: "16px 16px 16px 4px",
+                    background: "#fff",
+                    border: "1px solid #c7d2fe",
+                    color: "#6366f1",
+                    fontSize: 14,
+                    fontStyle: "italic",
+                  }}
+                >
+                  WoundSync AI is thinking…
+                </div>
+              </div>
+            )}
+            <div ref={chatEndRef} />
+          </div>
+
+          {/* Input bar */}
+          <div
+            style={{
+              padding: "12px 18px",
+              borderTop: "1px solid #c7d2fe",
+              display: "flex",
+              gap: 10,
+              background: "#fff",
+            }}
+          >
+            <input
+              type="text"
+              value={chatInput}
+              onChange={(e) => setChatInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
+              placeholder="Ask a follow-up question about your wound…"
+              disabled={chatLoading}
+              style={{
+                flex: 1,
+                padding: "10px 14px",
+                borderRadius: 10,
+                border: "1px solid #c7d2fe",
+                fontSize: 14,
+                outline: "none",
+                background: chatLoading ? "#f5f5f5" : "#fff",
+              }}
+            />
+            <button
+              onClick={sendChat}
+              disabled={!chatInput.trim() || chatLoading}
+              style={{
+                padding: "10px 20px",
+                borderRadius: 10,
+                border: "none",
+                background: !chatInput.trim() || chatLoading ? "#a5b4fc" : "#3730a3",
+                color: "#fff",
+                fontWeight: 700,
+                fontSize: 14,
+                cursor: !chatInput.trim() || chatLoading ? "not-allowed" : "pointer",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {chatLoading ? "…" : "Send"}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
