@@ -1,7 +1,7 @@
 {
   "by_resolution": {
-    "699x183": 75.0,
-    "640x640": 150.0
+    "699x183": 75.0
   },
-  "default": 60.0
+  "_note": "Default px/cm is a rough estimate only. 640x640 was removed because Roboflow always resizes to that resolution regardless of original scene scale, making it useless for calibration. Accurate measurement requires a physical reference (coin, ruler) in the photo.",
+  "default": 120.0
 }

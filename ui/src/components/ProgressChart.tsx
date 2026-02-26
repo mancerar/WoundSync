@@ -25,13 +25,9 @@ export function ProgressChart({ profileId }: { profileId: string }) {
   async function loadChartData() {
     try {
       setLoading(true);
-
-      // NOTE: keep it simple for now since you hardcoded it before
-      // (we can swap to env BACKEND_URL later)
       const response = await fetch(
-        `http://127.0.0.1:8000/api/charts/metrics/${encodeURIComponent(profileId)}`
+        `http://127.0.0.1:8001/api/charts/metrics/${encodeURIComponent(profileId)}`
       );
-
       const result = await response.json();
       if (result?.ok) {
         setData(result.data as ChartData);

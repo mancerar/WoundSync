@@ -1127,4 +1127,450 @@ async def predict(
         logger.exception("Predict failed")
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
 
+
+# ===== FOLLOW-UP CHAT ENDPOINT =====
+
+class ChatRequest(BaseModel):
+    question: str
+    wound_context: Optional[Dict[str, Any]] = None
+    history: Optional[List[Dict[str, str]]] = None  # [{"role":"user","content":"..."},...]
+
+
+def _build_wound_summary(ctx: Optional[Dict]) -> str:
+    """Convert the predict response into a compact plain-text summary for the system prompt."""
+    if not ctx:
+        return "No wound analysis data available."
+    lines = ["== Patient Wound Analysis Summary =="]
+    m = ctx.get("measurements") or {}
+    if m:
+        lines.append(f"Wound size: {m.get('length_cm', '?')} cm long x {m.get('width_cm', '?')} cm wide, area {m.get('area_cm2', '?')} cm²")
+    ha = ctx.get("healing_assessment") or {}
+    if ha:
+        lines.append(f"Healing stage: {ha.get('healing_stage', '?')}, progress: {ha.get('healing_progress', '?')}, severity: {ha.get('severity', '?')}")
+        ir = ha.get("infection_risk") or {}
+        if ir:
+            lines.append(f"Infection risk: {ir.get('level', '?')} ({ir.get('score', '?')}%)")
+        st = ha.get("stitches") or {}
+        if st:
+            lines.append(f"Closure: {'Stitches needed' if st.get('need_stitches') else 'Heals naturally'} — {st.get('recommendation', '')}")
+        htp = ha.get("healing_time_prediction") or {}
+        if htp:
+            lines.append(f"Estimated healing: {htp.get('predicted_days_min', '?')}–{htp.get('predicted_days_max', '?')} days")
+        concerns = ha.get("concerns") or []
+        if concerns:
+            lines.append("Concerns: " + "; ".join(concerns))
+    ca = ctx.get("color_analysis") or {}
+    if ca:
+        lines.append(f"Color description: {ca.get('color_description', '?')}")
+        cper = ca.get("color_percentages") or {}
+        if cper:
+            lines.append("Color breakdown: " + ", ".join(f"{k} {v:.0f}%" for k, v in cper.items()))
+    rec = ctx.get("recommendations") or {}
+    ic = rec.get("immediate_care") or []
+    if ic:
+        lines.append("Immediate care: " + "; ".join(ic[:3]))
+    oa = ctx.get("overall_assessment") or ""
+    if oa:
+        lines.append(f"Clinical summary: {oa}")
+    return "\n".join(lines)
+
+
+def _extract_wound_facts(ctx: Optional[Dict]) -> Dict:
+    """Pull every useful field out of the predict response into a flat dict."""
+    if not ctx:
+        return {}
+    m   = ctx.get("measurements") or {}
+    ha  = ctx.get("healing_assessment") or {}
+    ca  = ctx.get("color_analysis") or {}
+    rec = ctx.get("recommendations") or {}
+    cper = ca.get("color_percentages") or {}
+    ir   = ha.get("infection_risk") or {}
+    st   = ha.get("stitches") or {}
+    htp  = ha.get("healing_time_prediction") or {}
+    sr   = ha.get("scar_risk") or {}
+    hi   = ha.get("health_indicators") or {}
+
+    pink      = float(cper.get("pink", 0))
+    red       = float(cper.get("red", 0))
+    brown     = float(cper.get("brown", 0))
+    black     = float(cper.get("black", 0))
+    yellow    = float(cper.get("yellow", 0))
+    area      = float(m.get("area_cm2") or 0)
+    length    = float(m.get("length_cm") or 0)
+    width     = float(m.get("width_cm") or 0)
+
+    # Derive wound type from color evidence
+    if pink > 30:
+        wound_type = "surface abrasion / scrape"
+    elif red > 35:
+        wound_type = "actively bleeding or granulating wound"
+    elif black > 20:
+        wound_type = "wound with necrotic (dead) tissue"
+    elif yellow > 20:
+        wound_type = "wound with possible slough or early infection"
+    elif brown > 40:
+        wound_type = "scabbing or healing wound"
+    else:
+        wound_type = "open wound"
+
+    return {
+        "wound_type":      wound_type,
+        "area":            area,
+        "length":          length,
+        "width":           width,
+        "stage":           (ha.get("healing_stage") or "inflammatory").lower(),
+        "progress":        (ha.get("healing_progress") or "unknown").lower(),
+        "severity":        (ha.get("severity") or "moderate").lower(),
+        "infection_level": (ir.get("level") or "unknown").lower(),
+        "infection_score": int(ir.get("score") or 0),
+        "need_stitches":   bool(st.get("need_stitches", False)),
+        "stitches_rec":    st.get("recommendation", ""),
+        "days_min":        int(htp.get("predicted_days_min") or 0),
+        "days_max":        int(htp.get("predicted_days_max") or 0),
+        "heal_confidence": (htp.get("confidence") or "").lower(),
+        "scar_risk":       (sr.get("risk") or "unknown").lower(),
+        "scar_score":      int(sr.get("score") or 0),
+        "scar_tips":       sr.get("tips") or [],
+        "color_desc":      ca.get("color_description") or "",
+        "pink": pink, "red": red, "brown": brown,
+        "black": black, "yellow": yellow,
+        "concerns":        ha.get("concerns") or [],
+        "healing_inds":    ha.get("healing_indicators") or [],
+        "immediate_care":  rec.get("immediate_care") or [],
+        "ongoing_care":    rec.get("ongoing_care") or [],
+        "warning_signs":   rec.get("warning_signs") or [],
+        "overall":         ctx.get("overall_assessment") or "",
+        "has_infection_signs": bool(hi.get("signs_of_infection")),
+        "healthy_pink":    bool(hi.get("healthy_pink_present")),
+        "necrotic":        bool(hi.get("necrotic_tissue")),
+    }
+
+
+def _smart_answer(question: str, f: Dict) -> str:
+    """
+    Generate a personalised, data-driven answer to any wound care question
+    using the extracted wound facts.  No Ollama needed.
+    """
+    q = question.lower()
+    no_data = not f
+
+    # Helper: size description
+    def size_str():
+        if f.get("area"):
+            s = f"{f['area']:.1f} cm²"
+            if f.get("length") and f.get("width"):
+                s += f" ({f['length']:.1f} × {f['width']:.1f} cm)"
+            return s
+        return "an unknown size"
+
+    # ── WHAT IS THE WOUND / DESCRIBE / TYPE ──────────────────────────────────
+    if any(w in q for w in ["what is", "what's", "what type", "what kind", "describe", "tell me about",
+                             "what wound", "kind of wound", "type of wound", "explain"]):
+        if no_data:
+            return "No wound analysis data is available. Please run an analysis first."
+        parts = [
+            f"Based on the image analysis, your wound appears to be a **{f['wound_type']}** with an estimated area of {size_str()}.",
+            f"It is currently in the **{f['stage']} stage** of healing with **{f['severity']} severity** and healing progress classified as **{f['progress']}**.",
+        ]
+        if f["concerns"]:
+            parts.append("The analysis flagged these concerns: " + "; ".join(f["concerns"]) + ".")
+        if f["pink"] > 30:
+            parts.append("The high proportion of pink tissue is a positive sign — it indicates the wound surface is relatively shallow and active epithelial (skin repair) cells are present.")
+        elif f["yellow"] > 20:
+            parts.append("The yellow tissue detected may represent slough (dead tissue) or early infection — this warrants close monitoring.")
+        elif f["black"] > 20:
+            parts.append("The dark/black tissue is a concern as it may indicate necrotic (dead) tissue — consider seeking professional evaluation.")
+        if f["need_stitches"]:
+            parts.append(f"⚠️ The analysis recommends closure: {f['stitches_rec']}")
+        else:
+            parts.append("✅ This wound is assessed as suitable for natural healing with proper home care.")
+        parts.append("If anything looks or feels worse over the next 24–48 hours, please consult a healthcare professional.")
+        return " ".join(parts)
+
+    # ── STITCHES / SUTURES / CLOSURE ─────────────────────────────────────────
+    if any(w in q for w in ["stitch", "suture", "closure", "sew", "glue", "close the wound"]):
+        if no_data:
+            return ("Stitches are generally needed when a wound is deeper than ~0.5 cm, longer than 2–3 cm with edges that won't stay together, "
+                    "or won't stop bleeding after 10 minutes of firm pressure. Please run a wound analysis for a specific recommendation.")
+        if f["need_stitches"]:
+            return (f"Yes — based on your wound analysis, closure is recommended. {f['stitches_rec']} "
+                    "Please seek medical attention promptly. Wounds closed within 6–8 hours generally heal with better outcomes.")
+        else:
+            return (f"Good news — based on your analysis ({f['wound_type']}, {size_str()}), stitches are not needed. "
+                    f"{f['stitches_rec']} "
+                    "Focus on keeping the wound clean and moist to support natural healing.")
+
+    # ── INFECTION ─────────────────────────────────────────────────────────────
+    if any(w in q for w in ["infect", "infected", "pus", "smell", "odour", "odor", "fever",
+                             "swollen", "swelling", "warm", "hot", "red around"]):
+        if no_data:
+            return ("Signs of infection include increasing redness, warmth, swelling, pus, foul odour, or fever. "
+                    "If any of these appear, seek medical care promptly.")
+        level = f["infection_level"]
+        score = f["infection_score"]
+        base = f"Your wound analysis rated infection likelihood as **{level} ({score}%)**. "
+        if level in ("high", "severe") or f["has_infection_signs"]:
+            return (base + "This is concerning. Watch closely for: increasing redness spreading from the wound edges, warmth, swelling, "
+                    "cloudy/yellow discharge, foul odour, or fever above 38°C (100.4°F). "
+                    "If any of these are present or worsen, seek medical care today — infected wounds often need antibiotics. "
+                    "Do NOT use hydrogen peroxide; rinse gently with saline only.")
+        elif level == "moderate":
+            return (base + "Monitor the wound carefully over the next 24–48 hours. "
+                    "Keep it clean with saline rinse once or twice daily and watch for worsening redness, swelling, or discharge. "
+                    "If you notice pus, increasing pain, or a fever, seek medical attention promptly.")
+        else:
+            return (base + "The infection risk appears low based on the current image. "
+                    "Continue daily cleaning with saline and keep the wound moist with petroleum jelly under a non-adherent dressing. "
+                    "If redness, warmth, or swelling increases over the next few days, consult a healthcare professional.")
+
+    # ── CLEANING / WASHING ────────────────────────────────────────────────────
+    if any(w in q for w in ["clean", "wash", "rinse", "saline", "antiseptic", "disinfect", "hydrogen peroxide", "iodine"]):
+        parts = ["Clean your wound gently **once or twice daily** using sterile saline or clean running water — lukewarm temperature is fine."]
+        parts.append("**Avoid hydrogen peroxide, iodine, and alcohol** on open wounds; these kill the new cells trying to heal the wound and slow recovery significantly.")
+        if not no_data and f["wound_type"] == "surface abrasion / scrape":
+            parts.append(f"For a surface abrasion like yours ({size_str()}), a gentle rinse to remove debris is ideal — don't scrub.")
+        parts.append("After rinsing, pat dry with a clean cloth, then apply a thin layer of plain petroleum jelly before covering with a dressing.")
+        return " ".join(parts)
+
+    # ── DRESSING / BANDAGE / COVER ────────────────────────────────────────────
+    if any(w in q for w in ["dressing", "bandage", "cover", "plaster", "wrap", "pad"]):
+        parts = ["Use a **non-adherent dressing** (e.g., Telfa pad or a hydrocolloid dressing) over a thin layer of petroleum jelly."]
+        parts.append("Change the dressing **daily**, or immediately if it becomes wet, dirty, or soaked through.")
+        if not no_data and f["area"] > 5:
+            parts.append(f"Given the size of your wound ({size_str()}), a larger dressing pad may be needed to fully cover the area — ensure the dressing extends at least 1 cm beyond the wound edges on all sides.")
+        parts.append("A moist wound heals significantly faster than a dry one — the petroleum jelly under the dressing maintains the right moisture level and prevents the dressing from sticking to new tissue.")
+        return " ".join(parts)
+
+    # ── SCAR / SCARRING ───────────────────────────────────────────────────────
+    if any(w in q for w in ["scar", "scarring", "mark", "discolor", "discolour"]):
+        if no_data:
+            return ("Scarring depends on wound depth, location, genetics, and care quality. "
+                    "Keep the wound moist, avoid picking scabs, and use SPF 30+ on the healed area for 6–12 months.")
+        risk = f["scar_risk"]
+        score = f["scar_score"]
+        parts = [f"Based on your analysis, your scar risk is rated **{risk} ({score}%)**."]
+        if f["scar_tips"]:
+            parts.append("Recommended scar prevention steps: " + " | ".join(f["scar_tips"][:3]) + ".")
+        else:
+            if risk in ("high", "severe"):
+                parts.append("To minimise scarring: keep the wound moist throughout healing, never pick scabs, and consider silicone gel sheets once the skin fully closes.")
+            else:
+                parts.append("To minimise any scarring: keep the wound moist, avoid sun exposure on the healing area, and once healed apply SPF 30+ sunscreen daily for 6–12 months.")
+        if f["pink"] > 30:
+            parts.append("The presence of healthy pink tissue is encouraging — it suggests active skin regeneration which generally results in better cosmetic outcomes.")
+        return " ".join(parts)
+
+    # ── PAIN / PAINKILLERS ────────────────────────────────────────────────────
+    if any(w in q for w in ["pain", "hurt", "painful", "sore", "painkiller", "ibuprofen",
+                             "paracetamol", "acetaminophen", "tylenol", "advil", "naproxen"]):
+        parts = ["**Acetaminophen (paracetamol / Tylenol)** and **ibuprofen (Advil / Nurofen)** are both effective for wound pain."]
+        parts.append("Ibuprofen has the added benefit of reducing inflammation — helpful in the early days.")
+        parts.append("Follow label dosing carefully; avoid ibuprofen if you have stomach ulcers, kidney issues, or are pregnant.")
+        if not no_data and f["severity"] in ("severe", "critical"):
+            parts.append(f"Given that your wound is classified as **{f['severity']} severity**, persistent or worsening pain could indicate infection or deeper tissue damage — seek medical attention if pain is not improving after 48 hours.")
+        else:
+            parts.append("If pain suddenly worsens after initially improving, this can be a sign of infection — monitor and seek care if this happens.")
+        return " ".join(parts)
+
+    # ── HEALING TIME ──────────────────────────────────────────────────────────
+    if any(w in q for w in ["how long", "heal", "healing time", "days", "weeks", "recovery", "when will"]):
+        if no_data:
+            return ("Healing time depends on wound size, depth, location, age, and overall health. "
+                    "Small surface wounds: 1–2 weeks. Larger or deeper wounds: 3–8+ weeks. "
+                    "Keeping the wound clean and moist significantly speeds recovery.")
+        if f["days_min"] and f["days_max"]:
+            parts = [f"Based on your wound analysis, the estimated healing time is **{f['days_min']}–{f['days_max']} days** (confidence: {f['heal_confidence']})."]
+        else:
+            parts = ["A specific healing estimate was not generated for your wound."]
+        parts.append(f"This is a {f['wound_type']} ({size_str()}) in the **{f['stage']} stage**.")
+        if f["stage"] == "inflammatory":
+            parts.append("Inflammatory stage usually lasts 3–5 days — expect some redness and swelling which is normal.")
+        elif f["stage"] == "proliferative":
+            parts.append("The wound is in the proliferative (tissue-building) stage — good progress. New tissue is actively forming.")
+        elif f["stage"] == "remodeling":
+            parts.append("The wound is in the remodeling stage, which is the final phase — the surface has likely closed and the underlying tissue is strengthening.")
+        if f["concerns"]:
+            parts.append("Note: healing may be affected by: " + "; ".join(f["concerns"][:2]) + ".")
+        parts.append("Consistent daily wound care (clean + moist + protected) will keep the healing on track.")
+        return " ".join(parts)
+
+    # ── CARE STEPS / WHAT SHOULD I DO / TREATMENT ────────────────────────────
+    if any(w in q for w in ["what should i do", "how do i treat", "treatment", "care", "manage",
+                             "steps", "help", "advice", "recommend", "next step"]):
+        if no_data:
+            return ("General wound care: 1) Clean once or twice daily with saline. 2) Apply petroleum jelly. "
+                    "3) Cover with a non-adherent dressing. 4) Change daily. 5) Watch for infection signs. "
+                    "Please run a wound analysis for personalised advice.")
+        parts = [f"Here is a personalised care plan for your **{f['wound_type']}** ({size_str()}):"]
+        steps = []
+        # From analysis immediate care
+        for s in f["immediate_care"][:3]:
+            steps.append(s)
+        # Fill gaps from wound type
+        if not any("clean" in s.lower() or "saline" in s.lower() for s in steps):
+            steps.append("Clean gently once or twice daily with sterile saline or clean water.")
+        if not any("moist" in s.lower() or "petroleum" in s.lower() for s in steps):
+            steps.append("Apply a thin layer of petroleum jelly and cover with a non-adherent dressing.")
+        if not any("dress" in s.lower() or "change" in s.lower() for s in steps):
+            steps.append("Change the dressing daily or when soiled.")
+        parts.append("\n" + "\n".join(f"• {s}" for s in steps))
+        if f["need_stitches"]:
+            parts.append(f"\n⚠️ Important: {f['stitches_rec']}")
+        if f["infection_level"] in ("moderate", "high"):
+            parts.append(f"\n⚠️ Infection risk is {f['infection_level']} ({f['infection_score']}%) — watch closely for worsening redness, warmth, or discharge.")
+        parts.append("\nIf in doubt at any point, please consult a healthcare professional.")
+        return " ".join(parts)
+
+    # ── DOCTOR / HOSPITAL / URGENT ────────────────────────────────────────────
+    if any(w in q for w in ["doctor", "hospital", "er ", "emergency", "urgent", "go in", "seek", "professional"]):
+        if no_data:
+            return ("Seek medical attention if: the wound won't stop bleeding after 10 minutes of firm pressure, "
+                    "it is very deep or gaping, you see signs of infection (pus, fever, spreading redness), "
+                    "or you are unsure about tetanus vaccination.")
+        urgency_parts = []
+        if f["need_stitches"]:
+            urgency_parts.append(f"your wound analysis recommends closure — {f['stitches_rec']}")
+        if f["infection_level"] in ("high", "severe") or f["has_infection_signs"]:
+            urgency_parts.append(f"infection signs were detected (risk: {f['infection_level']}, {f['infection_score']}%)")
+        if f["necrotic"]:
+            urgency_parts.append("necrotic (dead) tissue was detected, which needs professional assessment")
+        if urgency_parts:
+            return ("Based on your analysis, you should seek medical attention because: " +
+                    "; ".join(urgency_parts) + ". Please do not delay — contact your nearest clinic or urgent care centre.")
+        else:
+            return (f"Your wound ({f['wound_type']}, {size_str()}) does not currently show immediate red-flag indicators in the analysis. "
+                    "However, always seek medical care if: bleeding won't stop, pain worsens significantly, you develop a fever, "
+                    "or you see spreading redness or pus in the coming days.")
+
+    # ── GENERIC / ANYTHING ELSE — full contextual summary ────────────────────
+    if no_data:
+        return ("I don't have analysis data to work from yet. Please run a wound scan first, "
+                "then I can give you specific answers about your wound. In general: keep wounds clean, moist, and covered.")
+
+    # Build a comprehensive personalised response using all available data
+    parts = [f"Based on your wound analysis, here's what I can tell you about your **{f['wound_type']}** ({size_str()}):"]
+
+    parts.append(f"\n**Healing status:** {f['stage']} stage, {f['severity']} severity, progress is {f['progress']}.")
+
+    if f["days_min"] and f["days_max"]:
+        parts.append(f"**Estimated healing time:** {f['days_min']}–{f['days_max']} days.")
+
+    if f["infection_level"] not in ("unknown", "low"):
+        parts.append(f"**Infection risk:** {f['infection_level']} ({f['infection_score']}%) — continue monitoring.")
+
+    if f["need_stitches"]:
+        parts.append(f"**Closure:** ⚠️ {f['stitches_rec']}")
+    else:
+        parts.append("**Closure:** ✅ This wound is expected to heal naturally with proper care.")
+
+    if f["concerns"]:
+        parts.append("**Concerns noted:** " + "; ".join(f["concerns"][:2]) + ".")
+
+    if f["immediate_care"]:
+        parts.append("**Key care steps:** " + " | ".join(f["immediate_care"][:3]) + ".")
+
+    parts.append("\nIf in doubt about anything specific, please consult a healthcare professional.")
+    return "\n".join(parts)
+
+
+def _ensure_ollama_running():
+    """Try to start the Ollama daemon if it is not already running."""
+    import subprocess, time
+    try:
+        import httpx
+        r = httpx.get("http://localhost:11434/api/tags", timeout=2)
+        if r.status_code == 200:
+            return True  # already up
+    except Exception:
+        pass
+    # Not running — try to launch it
+    try:
+        subprocess.Popen(
+            ["ollama", "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        time.sleep(4)   # give the daemon time to initialise
+        return True
+    except Exception as e:
+        logger.warning(f"[Chat] Could not start Ollama: {e}")
+        return False
+
+
+@app.post("/chat")
+async def chat(req: ChatRequest):
+    """Answer any question using the local AI model, grounded in the patient's wound data."""
+    question = req.question.strip()
+    if not question:
+        return JSONResponse(status_code=400, content={"ok": False, "error": "Question cannot be empty."})
+
+    wound_summary = _build_wound_summary(req.wound_context)
+
+    system_prompt = (
+        "You are WoundSync AI, a first-aid and wound-care assistant built into a medical app. "
+        "Your SOLE purpose is to help users understand and care for their wounds at home. "
+        "IMPORTANT RULES you must follow without exception:\n"
+        "1. ALWAYS answer wound care questions such as how to clean a wound, how to bandage it, signs of infection, healing time, and when to see a doctor. This is your primary job — never refuse these.\n"
+        "2. Give specific, step-by-step first-aid instructions using plain language.\n"
+        "3. If the user's wound analysis is provided below, reference it directly (e.g. 'Since your wound is classified as a laceration...').\n"
+        "4. You MAY answer general medical, health, or science questions using your knowledge.\n"
+        "5. At the end of serious answers add: 'If symptoms worsen, see a healthcare professional.'\n"
+        "6. NEVER say 'I cannot provide medical advice' for basic first-aid topics — that refusal is harmful in this context.\n\n"
+        f"{wound_summary}"
+    )
+
+    messages = [{"role": "system", "content": system_prompt}]
+    for msg in (req.history or []):
+        if msg.get("role") in ("user", "assistant") and msg.get("content"):
+            messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": question})
+
+    # ── Try Ollama (AI model) ─────────────────────────────────────────────────
+    _ensure_ollama_running()
+    try:
+        import ollama
+        model_resp = ollama.list()
+        available = [m.model if hasattr(m, 'model') else m.get('name', '')
+                     for m in (model_resp.models if hasattr(model_resp, 'models') else model_resp.get('models', []))]
+        # llama3.2 handles chat/system-prompts correctly; meditron is clinical
+        # notes only and echoes the system prompt — use it last resort only
+        PREFERRED = ["llama3.2:3b", "llama3:8b", "llama3.2", "llama3", "mistral", "phi3", "gemma", "meditron:7b", "meditron"]
+        model_name = next((p for p in PREFERRED if any(a.startswith(p.split(":")[0]) for a in available)),
+                          available[0] if available else None)
+        if not model_name:
+            raise RuntimeError("No models installed in Ollama")
+        logger.info(f"[Chat] Using Ollama model: {model_name}")
+
+        # meditron doesn't honour the system role — fold context into user turn
+        if "meditron" in model_name.lower():
+            messages_to_send = []
+            for msg in messages:
+                if msg["role"] == "system":
+                    # inject as a prefixed user message
+                    messages_to_send.append({
+                        "role": "user",
+                        "content": f"[Context for your answers]\n{msg['content']}\n\nPlease keep this context in mind for all your responses."
+                    })
+                    messages_to_send.append({"role": "assistant", "content": "Understood. I will use this context to answer your questions."})
+                else:
+                    messages_to_send.append(msg)
+        else:
+            messages_to_send = messages
+        resp = ollama.chat(
+            model=model_name,
+            messages=messages_to_send,
+            options={"temperature": 0.5, "top_p": 0.9, "num_predict": 1024},
+        )
+        answer = resp.message.content if hasattr(resp, "message") else resp["message"]["content"]
+        return JSONResponse(content={"ok": True, "answer": answer.strip(), "source": "ai", "model": model_name})
+    except Exception as ollama_err:
+        logger.warning(f"[Chat] Ollama failed ({ollama_err}), using context-aware fallback")
+
+    # ── Context-aware smart fallback (no AI available) ────────────────────────
+    facts = _extract_wound_facts(req.wound_context)
+    answer = _smart_answer(question, facts)
+    return JSONResponse(content={"ok": True, "answer": answer, "source": "analysis-based"})
+
+
 # ===== WOUND PROFILE MANAGEMENT ENDPOINTS =====

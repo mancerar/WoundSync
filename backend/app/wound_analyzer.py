@@ -10,20 +10,23 @@ import cv2
 import numpy as np
 from pathlib import Path
 from typing import Dict, Optional, Tuple
-from .calibration import get_ppcm_from_calibration
+from .calibration import get_ppcm_from_calibration, get_default_ppcm
 from .config import get_roboflow_config
-from .calibration import get_ppcm_from_calibration
+from .ai_feedback import AIFeedbackGenerator, MEDICAL_DISCLAIMER
 
 
 class WoundAnalyzer:
     """Analyzes wound images to extract measurements and characteristics."""
     
-    def __init__(self, pixels_per_cm: float = 45.0, auto_calibrate: bool = True, assumed_wound_width_cm: float = 0.3):
+    def __init__(self, pixels_per_cm: float = 45.0, auto_calibrate: bool = True, assumed_wound_width_cm: float = 0.3, use_ai_feedback: bool = True):
         """
         Initialize the wound analyzer.
         
         Args:
             pixels_per_cm: Assumed conversion factor from pixels to centimeters
+            auto_calibrate: Whether to auto-calibrate pixel measurements
+            assumed_wound_width_cm: Assumed wound width for calibration
+            use_ai_feedback: Whether to use AI-powered clinical feedback (Ollama)
         """
         self.pixels_per_cm = pixels_per_cm
         self.auto_calibrate = auto_calibrate
@@ -31,6 +34,8 @@ class WoundAnalyzer:
         self.assumed_wound_width_cm = max(0.05, float(assumed_wound_width_cm))
         # Human-friendly method label, overridden by ML analyzer
         self.method_name = "Traditional Computer Vision"
+        # Initialize AI feedback generator
+        self.ai_feedback = AIFeedbackGenerator(use_ai=use_ai_feedback) if use_ai_feedback else None
     
     def analyze_wound(self, image_path: str, save_visual: bool = True, output_dir: str = "output") -> Dict:
         """
@@ -54,7 +59,7 @@ class WoundAnalyzer:
             ppcm_used = self.pixels_per_cm
             calib_info = {"mode": "default", "ppcm": ppcm_used}
             if self.auto_calibrate:
-                # 0) Try explicit calibration profile if present
+                # 0) Try exact resolution match from calibration.json
                 calib_ppcm = get_ppcm_from_calibration(image.shape[1], image.shape[0])
                 if calib_ppcm is not None:
                     ppcm_used = float(np.clip(calib_ppcm, 10.0, 800.0))
@@ -62,12 +67,23 @@ class WoundAnalyzer:
 
                 est_ppcm = self._estimate_pixels_per_cm_from_mask(mask, self.assumed_wound_width_cm)
                 prior_ppcm = self._ppcm_prior_from_image_size(image)
-                if est_ppcm is not None and prior_ppcm is not None:
-                    # Blend prior (dataset-level) with thickness estimate (image-level)
+
+                # Determine wound shape: blob-like (abrasion/ulcer) vs elongated (laceration/incision).
+                # For blob-like wounds the thickness estimator is unreliable (assumes a thin 0.3 cm slit),
+                # so we skip blending and trust the image-size prior alone.
+                wound_is_elongated = False
+                _wound_cnts, _ = cv2.findContours((mask > 0).astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if _wound_cnts:
+                    _x, _y, _w_bb, _h_bb = cv2.boundingRect(max(_wound_cnts, key=cv2.contourArea))
+                    _ar = max(_w_bb, _h_bb) / max(1, min(_w_bb, _h_bb))
+                    wound_is_elongated = _ar >= 2.5  # thin / linear wound
+
+                if est_ppcm is not None and prior_ppcm is not None and wound_is_elongated:
+                    # Blend prior (dataset-level) with thickness estimate (image-level) for lacerations
                     # Weighted geometric mean favors prior for stability
                     blended = float(np.exp(0.7 * np.log(prior_ppcm) + 0.3 * np.log(est_ppcm)))
                     blended = float(np.clip(blended, 20.0, 400.0))
-                    # If calibration.json already gave a value, keep it, else use blended
+                    # Only override if no exact calibration.json match was found
                     if calib_info.get("mode") != "calibration.json":
                         ppcm_used = blended
                         calib_info = {"mode": "blended", "ppcm": ppcm_used, "prior": prior_ppcm, "from_width_px": est_ppcm, "assumed_width_cm": self.assumed_wound_width_cm}
@@ -79,6 +95,11 @@ class WoundAnalyzer:
                     if calib_info.get("mode") != "calibration.json":
                         ppcm_used = est_ppcm
                         calib_info = {"mode": "width-from-image", "ppcm": ppcm_used, "assumed_width_cm": self.assumed_wound_width_cm}
+                else:
+                    # Last resort: use default from calibration.json
+                    if calib_info.get("mode") != "calibration.json":
+                        ppcm_used = get_default_ppcm()
+                        calib_info = {"mode": "default", "ppcm": ppcm_used}
 
             # First calculate measurements from the mask using calibrated ppcm
             measurements = self._calculate_measurements(mask, pixels_per_cm=ppcm_used)
@@ -108,11 +129,14 @@ class WoundAnalyzer:
             # Analyze wound color/characteristics
             color_analysis = self._analyze_color(image, mask)
             
-            # Generate healing assessment
-            healing_assessment = self._assess_healing(measurements, color_analysis)
-            
-            # Enhanced color analysis
+            # Enhanced color analysis (needed by AI post-processor for color percentages)
             enhanced_color_analysis = self._enhanced_color_analysis(image, mask)
+            
+            # Merge enhanced into color_analysis so AI post-processor has color_percentages
+            merged_color_analysis = {**color_analysis, **enhanced_color_analysis}
+            
+            # Generate healing assessment (pass merged so post-processor gets color_percentages)
+            healing_assessment = self._assess_healing(measurements, merged_color_analysis)
             
             # Generate visual output if requested
             visual_output_path = None
@@ -124,7 +148,7 @@ class WoundAnalyzer:
                 "confidence": confidence,
                 "method": getattr(self, "method_name", "Traditional Computer Vision"),
                 "measurements": measurements,
-                "color_analysis": {**color_analysis, **enhanced_color_analysis},
+                "color_analysis": merged_color_analysis,
                 "healing_assessment": healing_assessment,
                 "recommendations": healing_assessment.get("recommendations", {}),
                 "overall_assessment": healing_assessment.get("overall_assessment", ""),
@@ -728,8 +752,8 @@ class WoundAnalyzer:
     def _ppcm_prior_from_image_size(self, image: np.ndarray) -> Optional[float]:
         """Dataset prior: estimate px/cm from image width.
 
-        Assumption: images around 700 px wide map to ~60 px/cm in this dataset.
-        Scales linearly by width. Clamped to [20, 200] px/cm to avoid extremes.
+        Assumption: images around 700 px wide map to ~120 px/cm (updated to match
+        calibration.json default). Scales linearly by width. Clamped to [40, 300] px/cm.
         """
         try:
             h, w = image.shape[:2]
@@ -739,9 +763,9 @@ class WoundAnalyzer:
             ppcm_cal = get_ppcm_from_calibration(w, h)
             if ppcm_cal is not None:
                 return float(ppcm_cal)
-            base_ppcm = 60.0
+            base_ppcm = 120.0
             ppcm = base_ppcm * (w / 700.0)
-            return float(np.clip(ppcm, 20.0, 200.0))
+            return float(np.clip(ppcm, 40.0, 300.0))
         except Exception:
             return None
 
@@ -837,15 +861,28 @@ class WoundAnalyzer:
         }
     
     def _assess_healing(self, measurements: Dict, color_analysis: Dict) -> Dict:
-        """Assess wound healing status and provide comprehensive treatment guidance."""
-        # Comprehensive healing assessment
+        """Assess wound healing status using AI when available, rules as fallback."""
+
+        # ==== TRY AI FIRST — returns complete structured result if successful ====
+        if self.ai_feedback is not None:
+            try:
+                ai_result = self.ai_feedback.generate_full_assessment({
+                    'measurements': measurements,
+                    'color_analysis': color_analysis,
+                })
+                if ai_result:
+                    print(f"[AI Feedback] Generated using: {ai_result.get('assessment_method', 'unknown')}")
+                    return ai_result
+            except Exception as e:
+                print(f"[AI Feedback] Error: {e}. Falling back to rule-based assessment.")
+
+        # ==== RULE-BASED FALLBACK (only used when AI is unavailable) ====
         concerns = []
         healing_indicators = []
         severity = "mild"
         healing_stage = "inflammatory"
         healing_progress = "normal"
-        
-        # Size-based assessment
+
         area_cm2 = measurements.get("area_cm2", 0)
         length_cm = measurements.get("length_cm", 0)
         width_cm = measurements.get("width_cm", 0)
@@ -858,7 +895,7 @@ class WoundAnalyzer:
             area_cm2 < SMALL_WOUND_AREA_CM2 and
             length_cm < SMALL_WOUND_LENGTH_CM
         )
-        
+
         if area_cm2 > 15:
             concerns.append("Very large wound area requiring specialized care")
             severity = "severe"
@@ -870,19 +907,16 @@ class WoundAnalyzer:
             concerns.append("Moderate wound size")
             if severity == "mild":
                 severity = "moderate"
-        
-        # Aspect ratio assessment
+
         if length_cm > 0 and width_cm > 0:
             aspect_ratio = max(length_cm, width_cm) / min(length_cm, width_cm)
             if aspect_ratio > 3:
                 concerns.append("Irregular wound shape may complicate healing")
-        
-        # Color-based healing assessment
+
         color_desc = color_analysis.get("color_description", "")
         redness = color_analysis.get("redness_level", 0)
         darkness = color_analysis.get("darkness_level", 0)
-        
-        # Determine healing stage and progress
+
         if "pink" in color_desc or "healing" in color_desc:
             healing_indicators.append("Healthy pink coloration")
             healing_stage = "proliferative"
@@ -905,35 +939,30 @@ class WoundAnalyzer:
                 healing_indicators.append("Moderate inflammation - normal healing response")
             else:
                 healing_indicators.append("Mild inflammation")
-        
+
         if "yellow" in color_desc or "infected" in color_desc:
             concerns.append("Yellow discoloration suggests possible infection")
             severity = "severe"
             healing_progress = "impaired"
-        
+
         if "green" in color_desc:
             concerns.append("Green coloration indicates bacterial infection")
             severity = "severe"
             healing_progress = "infected"
-        
+
         if "dark" in color_desc or "necrotic" in color_desc or darkness > 0.7:
             concerns.append("Dark tissue suggests necrosis or poor circulation")
             severity = "severe"
             healing_progress = "compromised"
-        
-        # Generate comprehensive recommendations
+
         recommendations = self._generate_treatment_recommendations(
             severity, healing_stage, concerns, color_desc=color_analysis.get("color_description", "")
         )
-
-        # Predict healing time window
         healing_prediction = self._predict_healing_time(measurements, severity, healing_stage, color_analysis)
-
-        # Infection likelihood and stitches/closure assessment
         infection_risk = self._estimate_infection_risk(measurements, severity, healing_stage, color_analysis)
         stitches = self._assess_stitches_need(measurements, severity, healing_stage, color_analysis)
         scar_risk = self._estimate_scar_risk(measurements, severity, healing_stage, color_analysis)
-        
+
         return {
             "healing_stage": healing_stage,
             "healing_progress": healing_progress,
@@ -945,7 +974,8 @@ class WoundAnalyzer:
             "infection_risk": infection_risk,
             "stitches": stitches,
             "scar_risk": scar_risk,
-            "overall_assessment": self._generate_overall_assessment(severity, healing_stage, area_cm2)
+            "overall_assessment": self._generate_overall_assessment(severity, healing_stage, area_cm2),
+            "assessment_method": "Rule-based heuristics"
         }
     
     def _generate_treatment_recommendations(self, severity: str, healing_stage: str, concerns: list, color_desc: str = "") -> Dict:
@@ -1183,6 +1213,22 @@ class WoundAnalyzer:
                 "reasons": ["Small size without gaping"]
             }
 
+        # Check for surface abrasion — pink > 30% means epithelialization,
+        # not a deep wound that needs closure.
+        cper = color_analysis.get("color_percentages", {})
+        pink_pct = cper.get("pink", 0)
+        if pink_pct > 30:
+            return {
+                "need_stitches": False,
+                "recommendation": (
+                    "This appears to be a surface abrasion wound. Keep it clean and moist "
+                    "(saline rinse, petroleum jelly, non-adherent dressing). Stitches are "
+                    "not needed for surface abrasions. Seek medical attention if the wound "
+                    "is large (> 5 cm), very deep, or does not improve within a few days."
+                ),
+                "reasons": [f"Pink tissue ({pink_pct:.0f}%) indicates surface/epithelializing wound, not a deep laceration"]
+            }
+
         # Slightly raised thresholds with a "require both" primary condition
         L_REQ = 3.0
         W_REQ = 0.6
@@ -1190,15 +1236,15 @@ class WoundAnalyzer:
 
         need = False
         if (length >= L_REQ and width >= W_REQ):
-            need = True; reasons.append(f"length ≥ {L_REQ} cm AND width ≥ {W_REQ} cm")
+            need = True; reasons.append(f"length \u2265 {L_REQ} cm AND width \u2265 {W_REQ} cm")
         elif width >= W_EXTREME:
-            need = True; reasons.append(f"gaping width ≥ {W_EXTREME} cm")
+            need = True; reasons.append(f"gaping width \u2265 {W_EXTREME} cm")
         elif (length >= 2.0 and width >= 0.4 and redness > 0.6):
             need = True; reasons.append("gaping with notable inflammation")
         elif severity == "severe":
             need = True; reasons.append("severe presentation")
 
-        recommendation = "May heal naturally with proper care" if not need else "Likely requires sutures/closure—seek medical evaluation within 6–8 hours"
+        recommendation = "May heal naturally with proper care" if not need else "Likely requires sutures/closure\u2014seek medical evaluation within 6\u20138 hours"
         return {"need_stitches": bool(need), "recommendation": recommendation, "reasons": reasons}
 
     def _estimate_scar_risk(self, measurements: Dict, severity: str, stage: str, color_analysis: Dict) -> Dict:
