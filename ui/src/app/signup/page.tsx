@@ -22,7 +22,7 @@ export default function Signup() {
     
     // FIREBASE AUTHENTICATION - COMMENTED OUT FOR NOW
     // Uncomment this block when Firebase is configured
-    /*
+    
     signUp(email, pw)
       .then(() => {
         setUser({ email, username });
@@ -46,7 +46,7 @@ export default function Signup() {
         
         alert(errorMessage);
       });
-    */
+    
     
     // Temporary local-only signup (no Firebase)
     setUser({ email, username });

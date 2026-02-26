@@ -15,16 +15,21 @@ export default function Login() {
   const [username, setUsername] = useState("");
   const [pw, setPw] = useState("");
   const router = useRouter();
-  const { signIn } = useAuth();
+  const { signIn, authEnabled } = useAuth();
 
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     if (!email || !username) return alert("Enter email and username");
     if (!pw) return alert("Enter password");
     
-    // FIREBASE AUTHENTICATION - COMMENTED OUT FOR NOW
-    // Uncomment this block when Firebase is configured
-    /*
+    // If Firebase auth is not enabled, use local fallback and navigate.
+    if (!authEnabled) {
+      setUser({ email, username });
+      router.replace("/dashboard");
+      return;
+    }
+
+    
     signIn(email, pw)
       .then(() => {
         setUser({ email, username });
@@ -34,10 +39,12 @@ export default function Login() {
         console.error(err);
         const errorCode = err?.code;
         let errorMessage = "Sign in failed";
-        
-        if (errorCode === "auth/user-not-found" || errorCode === "auth/invalid-credential") {
+
+        if (errorCode === "auth/user-not-found" ) {
           errorMessage = "Account not found. Please create a new account.";
-        } else if (errorCode === "auth/wrong-password") {
+        } else if (errorCode === "auth/invalid-credential") {
+          errorMessage = "Incorrect password. Please try again.";
+        }else if (errorCode === "auth/wrong-password") {
           errorMessage = "Incorrect password. Please try again.";
         } else if (errorCode === "auth/invalid-email") {
           errorMessage = "Invalid email address.";
@@ -46,15 +53,9 @@ export default function Login() {
         } else if (err?.message) {
           errorMessage = err.message;
         }
-        
+
         alert(errorMessage);
       });
-    */
-    
-    // Temporary local-only login (no Firebase)
-    // Temporary local-only login (no Firebase)
-    setUser({ email, username });
-    router.replace("/dashboard");
   }
 
   return (

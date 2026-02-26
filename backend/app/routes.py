@@ -7,6 +7,7 @@ from pydantic import BaseModel
 
 from .database import get_db
 from .models import WoundProfile, WoundRecord
+from .security import require_auth
 
 router = APIRouter(prefix="/api", tags=["wound_profiles"])
 
@@ -83,7 +84,7 @@ def get_achievements(profile, records):
     return achievements
 
 @router.get("/profiles")
-def get_wound_profiles(user_id: str = "demo_user", db: Session = Depends(get_db)):
+def get_wound_profiles(user_id: str = Depends(require_auth), db: Session = Depends(get_db)):
     """Get all wound profiles for a user"""
     profiles = db.query(WoundProfile).filter(
         WoundProfile.user_id == user_id,
@@ -114,7 +115,7 @@ def get_wound_profiles(user_id: str = "demo_user", db: Session = Depends(get_db)
 @router.post("/profiles")
 def create_wound_profile(
     profile: WoundProfileCreate,
-    user_id: str = "demo_user",
+    user_id: str = Depends(require_auth),
     db: Session = Depends(get_db)
 ):
     """Create a new wound profile"""
@@ -146,9 +147,9 @@ def create_wound_profile(
 
 
 @router.get("/profiles/{profile_id}")
-def get_wound_profile(profile_id: int, db: Session = Depends(get_db)):
+def get_wound_profile(profile_id: int, user_id: str = Depends(require_auth), db: Session = Depends(get_db)):
     """Get a specific wound profile with all records"""
-    profile = db.query(WoundProfile).filter(WoundProfile.id == profile_id).first()
+    profile = db.query(WoundProfile).filter(WoundProfile.id == profile_id, WoundProfile.user_id == user_id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
     
@@ -211,9 +212,9 @@ def get_wound_profile(profile_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/profiles/{profile_id}")
-def delete_wound_profile(profile_id: int, db: Session = Depends(get_db)):
+def delete_wound_profile(profile_id: int, user_id: str = Depends(require_auth), db: Session = Depends(get_db)):
     """Archive a wound profile"""
-    profile = db.query(WoundProfile).filter(WoundProfile.id == profile_id).first()
+    profile = db.query(WoundProfile).filter(WoundProfile.id == profile_id, WoundProfile.user_id == user_id).first()
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
     
@@ -224,7 +225,7 @@ def delete_wound_profile(profile_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/profiles/seed")
-def seed_placeholder_data(user_id: str = "demo_user", db: Session = Depends(get_db)):
+def seed_placeholder_data(user_id: str = Depends(require_auth), db: Session = Depends(get_db)):
     """Create placeholder wound profiles with sample data for testing"""
     
     # Check if data already exists

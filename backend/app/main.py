@@ -4,18 +4,28 @@ import json
 import logging
 import os
 import tempfile
+import boto3
 from typing import Any, Dict, List, Optional, Tuple
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, UTC
+from boto3.dynamodb.conditions import Key
 
+
+import uuid
 import numpy as np
 import requests
-from fastapi import FastAPI, File, UploadFile, Query, Depends, HTTPException
+from fastapi import FastAPI, File, UploadFile, Query, Depends, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from app.security import require_auth
+
+
+from decimal import Decimal
+
+
 
 logger = logging.getLogger("woundsync-backend")
 logging.basicConfig(level=logging.INFO)
@@ -48,21 +58,21 @@ app.include_router(charts_router)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000/",
-        "http://127.0.0.1:3000/",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
 
         # Capacitor / iOS WebView origins:
         "capacitor://localhost",
         "ionic://localhost",
-        "http://localhost/",
-        "http://localhost:8100/",
+        "http://localhost",
+        "http://localhost:8100",
 
         # Your LAN UI (optional, if you ever run UI on LAN):
-        "http://192.168.86.33:3000/",
+        "http://192.168.86.33:3000",
     ],
     allow_credentials=True,
-    allow_methods=[""],
-    allow_headers=[""],
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -629,12 +639,240 @@ def compute_wound_assessment(
         "quality": q,
         "context": context,
     }
+    
+s3 = boto3.client(
+    "s3",
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
+    region_name=os.getenv("AWS_REGION")
+)
 
+BUCKET_NAME = os.getenv("S3_BUCKET")
+
+dynamodb = boto3.resource(
+    "dynamodb",
+    region_name=os.getenv("AWS_REGION"),
+    aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+    aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY")
+)
+
+DYNAMODB_TABLE = os.getenv("DYNAMODB_TABLE", "WoundSyncData").strip() or "WoundSyncData"
+
+@app.get("/test-s3")
+def test_s3():
+    response = s3.list_objects_v2(Bucket=BUCKET_NAME)
+    return {"status": "connected", "objects": response.get("Contents", [])}
 
 @app.get("/health")
 def health():
     return {"ok": True}
 
+@app.post("/wounds/{wound_id}/upload-url")
+def generate_upload_url(
+    wound_id: str,
+    content_type: str = Query("image/jpeg"),
+    #uid="demo-user"
+    uid:str = Depends(require_auth)
+):
+    if not isinstance(content_type, str) or not content_type.strip():
+        content_type = "image/jpeg"
+    content_type = content_type.strip()
+    key = f"{uid}/{wound_id}/{datetime.now(UTC).isoformat()}.jpg"
+
+    upload_url = s3.generate_presigned_url(
+        "put_object",
+        Params={
+            "Bucket": BUCKET_NAME,
+            "Key": key,
+            "ContentType": content_type
+        },
+        ExpiresIn=300
+    )
+
+    return {
+        "uploadUrl": upload_url,
+        "imageKey": key
+    }
+    
+@app.post("/wounds/{wound_id}/images")
+def save_wound_metadata(
+    wound_id: str,
+    body: dict,
+    #uid="demo-user"
+    uid: str = Depends(require_auth)
+):
+    try:
+        table = dynamodb.Table(DYNAMODB_TABLE)
+        if not isinstance(body, dict):
+            raise HTTPException(status_code=400, detail="Body must be a JSON object")
+        if "imageKey" not in body or not body.get("imageKey"):
+            raise HTTPException(status_code=400, detail="Missing required field: imageKey")
+
+        clean_body = json.loads(json.dumps(body), parse_float=Decimal)
+
+        ts = clean_body.get("timestamp", datetime.now().isoformat())
+        sk_value = clean_body.get("sk") or f"WOUND#{wound_id}#IMG#{ts}"
+
+        item = {
+            "userId": uid,
+            "woundId": wound_id,
+            "sk": sk_value,
+            "timestamp": ts,
+            "imageKey": clean_body["imageKey"],
+            "healingScore": clean_body.get("healingScore", Decimal("0")),
+            "analysis": clean_body.get("analysis", {}),
+        }
+
+        print("ITEM BEING SAVED:", item)
+
+        response = table.put_item(Item=item)
+
+        print("DYNAMO RESPONSE:", response)
+
+        return {"ok": True}
+
+    except Exception as e:
+        print("🔥 DYNAMO ERROR:", str(e))
+        return {"error": str(e)}
+
+
+class CreateWoundBody(BaseModel):
+    name: Optional[str] = None
+
+
+@app.post("/wounds")
+def create_wound_profile(
+    body: Optional[CreateWoundBody] = None,
+    uid: str = Depends(require_auth),
+):
+    
+    try:
+        table = dynamodb.Table(DYNAMODB_TABLE)
+        name = (body.name if body else None) or "New wound"
+        slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in name.strip())[:50] or "wound"
+        wound_id = f"{slug}-{uuid.uuid4().hex[:8]}"
+        ts = datetime.now(UTC).isoformat()
+        sk_value = f"WOUND#{wound_id}#PROFILE"
+
+        item = {
+            "userId": uid,
+            "woundId": wound_id,
+            "sk": sk_value,
+            "timestamp": ts,
+            "name": name[:200],
+        }
+        table.put_item(Item=item)
+        return {"ok": True, "woundId": wound_id}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/wounds")
+def list_user_wounds(uid: str = Depends(require_auth)):
+    try:
+        table = dynamodb.Table(DYNAMODB_TABLE)
+        items = []
+        try:
+            resp = table.query(
+                KeyConditionExpression=Key("userId").eq(uid) & Key("sk").begins_with("WOUND#")
+            )
+            items = resp.get("Items", [])
+
+            while "LastEvaluatedKey" in resp:
+                resp = table.query(
+                    KeyConditionExpression=Key("userId").eq(uid) & Key("sk").begins_with("WOUND#"),
+                    ExclusiveStartKey=resp["LastEvaluatedKey"]
+                )
+                items.extend(resp.get("Items", []))
+        except Exception as qerr:
+            logger.warning(f"Query by userId failed (table key may differ): {qerr}")
+            items = []
+
+        
+        if not items:
+            from boto3.dynamodb.conditions import Attr
+            resp = table.scan(FilterExpression=Attr("userId").eq(uid) & Attr("sk").begins_with("WOUND#"))
+            items = resp.get("Items", [])
+            while resp.get("LastEvaluatedKey"):
+                resp = table.scan(FilterExpression=Attr("userId").eq(uid) & Attr("sk").begins_with("WOUND#"), ExclusiveStartKey=resp.get("LastEvaluatedKey"))
+                items.extend(resp.get("Items", []))
+
+        
+        wounds = {}
+
+        for it in items:
+            wid = it.get("woundId")
+            ts = it.get("timestamp") or it.get("sk")
+            sk = it.get("sk") or ""
+
+            if not wid:
+                continue
+
+            entry = wounds.setdefault(
+                wid,
+                {"id": wid, "name": wid, "image_count": 0, "last_timestamp": None, "last_imageKey": None}
+            )
+
+            if "#IMG#" in sk or it.get("imageKey"):
+                entry["image_count"] += 1
+                if ts and (entry["last_timestamp"] is None or ts > entry["last_timestamp"]):
+                    entry["last_timestamp"] = ts
+                    entry["last_imageKey"] = it.get("imageKey")
+            else:
+               
+                if it.get("name"):
+                    entry["name"] = it["name"]
+                if entry["last_timestamp"] is None and ts:
+                    entry["last_timestamp"] = ts
+
+        
+        try:
+            logger.info(f"/wounds raw items count={len(items)}; aggregated wounds={len(wounds)}")
+            sample = list(wounds.values())[:5]
+            logger.info(f"/wounds sample aggregated: {sample}")
+        except Exception:
+            pass
+
+        return {"ok": True, "wounds": list(wounds.values())}
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+@app.get("/wounds/{wound_id}/images")
+def list_wound_images(wound_id: str, uid: str = Depends(require_auth)):
+    
+    try:
+        table = dynamodb.Table(DYNAMODB_TABLE)
+        from boto3.dynamodb.conditions import Attr
+
+        resp = table.scan(FilterExpression=Attr("userId").eq(uid) & Attr("woundId").eq(wound_id))
+        items = resp.get("Items", [])
+        while resp.get("LastEvaluatedKey"):
+            resp = table.scan(FilterExpression=Attr("userId").eq(uid) & Attr("woundId").eq(wound_id), ExclusiveStartKey=resp.get("LastEvaluatedKey"))
+            items.extend(resp.get("Items", []))
+
+       
+        def sort_key(itm):
+            return itm.get("timestamp") or itm.get("created_at") or itm.get("sk") or ""
+
+        items_sorted = sorted(items, key=sort_key, reverse=True)
+
+       
+        for it in items_sorted:
+            key = it.get("imageKey")
+            if key and isinstance(key, str) and key.startswith(str(uid)):
+                try:
+                    view_url = s3.generate_presigned_url(
+                        "get_object",
+                        Params={"Bucket": BUCKET_NAME, "Key": key},
+                        ExpiresIn=3600,
+                    )
+                    it["viewUrl"] = view_url
+                except Exception:
+                    pass
+
+        return {"ok": True, "images": items_sorted}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/predict")
 async def predict(

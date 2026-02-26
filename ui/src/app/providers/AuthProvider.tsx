@@ -25,6 +25,7 @@ type AuthContextType = {
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
+  getToken: () => Promise<string | null>;
   authEnabled: boolean;
 };
 
@@ -77,6 +78,11 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
       await createUserWithEmailAndPassword(auth!, email, password);
     };
 
+    const getToken = async () => {
+    if (!authEnabled || !auth?.currentUser) return null;
+      return await auth.currentUser.getIdToken();
+    };
+
     const signOut = async () => {
       if (!authEnabled) {
         setUser(null);
@@ -85,8 +91,8 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
       await fbSignOut(auth!);
     };
 
-    return { user, loading, signIn, signUp, signOut, authEnabled };
-  }, [user, loading, authEnabled]);
+    return { user, loading, signIn, signUp, signOut, getToken, authEnabled };
+  }, [authEnabled, user, loading]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

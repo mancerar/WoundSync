@@ -1,6 +1,9 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
+import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { processAndUploadWound, predictOnly } from "@/lib/wounds";
 
 type PredictResponse = {
   ok: boolean;
@@ -113,7 +116,10 @@ type PredictResponse = {
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
+
 export default function CapturePage() {
+  const searchParams = useSearchParams();
+  const woundId = searchParams.get("woundId");
   const [file, setFile] = useState<File | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string>("");
   const [loading, setLoading] = useState(false);
@@ -168,16 +174,26 @@ export default function CapturePage() {
     setResult(null);
 
     try {
-      const form = new FormData();
-      form.append("image", file);
+      const targetWoundId = woundId ?? "demo-wound";
+      const { analysis } = await processAndUploadWound(file, targetWoundId);
+      setResult(analysis as any); 
+    } catch (e: any) {
+      const msg = e?.message || "Request failed";
+      const authRequired = /not authenticated|sign in|sign-in|login|401/i.test(msg);
+      setResult({ ok: false, error: msg, ...(authRequired && { authRequired: true }) } as any);
+    } finally {
+      setLoading(false);
+    }
+  };
 
-      const res = await fetch(`${BACKEND_URL}/predict?debug=false`, {
-        method: "POST",
-        body: form,
-      });
-
-      const data = (await res.json()) as PredictResponse;
-      setResult(data);
+  
+  const onAnalyzeOnly = async () => {
+    if (!file) return;
+    setLoading(true);
+    setResult(null);
+    try {
+      const data = await predictOnly(file);
+      setResult(data as any);
     } catch (e: any) {
       setResult({ ok: false, error: e?.message || "Request failed" });
     } finally {
@@ -193,8 +209,13 @@ export default function CapturePage() {
 
   return (
     <div style={{ padding: 24, maxWidth: 1100, margin: "0 auto" }}>
-      <h2 style={{ marginBottom: 6 }}>Wound Check (Image Only)</h2>
-      <div style={{ color: "#666", marginBottom: 14 }}>
+      <Link href="/dashboard" style={{ display: "inline-block", color: "#2563eb", textDecoration: "none", fontWeight: 600, marginBottom: 12 }}>← Back to Dashboard</Link>
+      <h2 style={{ marginBottom: 6 }}>Add photo</h2>
+      <p style={{ color: "#666", marginBottom: 14 }}>
+        Adding to <strong>{woundId ? decodeURIComponent(woundId) : "your wound"}</strong>. We’ll analyze and save to this profile.
+      </p>
+      {/* old description removed */}
+      <div style={{ display: "none" }}>
         Upload a photo. Guidance is based on shape + visual cues (not “size in
         photo”), so zoomed-in papercuts won’t automatically be treated as severe.
       </div>
@@ -275,7 +296,24 @@ export default function CapturePage() {
             fontWeight: 700,
           }}
         >
-          {loading ? "Analyzing..." : "Analyze"}
+          {loading ? "Analyzing..." : "Analyze & save"}
+        </button>
+
+        <button
+          onClick={onAnalyzeOnly}
+          disabled={!file || loading}
+          title="No sign-in required. Results are not saved."
+          style={{
+            padding: "10px 14px",
+            borderRadius: 10,
+            border: "1px solid #16a34a",
+            background: "#fff",
+            color: "#16a34a",
+            cursor: !file || loading ? "not-allowed" : "pointer",
+            fontWeight: 600,
+          }}
+        >
+          Analyze only (no sign-in)
         </button>
 
         <button
@@ -347,8 +385,26 @@ export default function CapturePage() {
           )}
 
           {result && !result.ok && (
-            <div style={{ color: "#b00020" }}>
-              {result.error || "Something went wrong."}
+            <div>
+              <div style={{ color: "#b00020", marginBottom: 8 }}>
+                {result.error || "Something went wrong."}
+              </div>
+              {(result as any).authRequired && (
+                <Link
+                  href="/"
+                  style={{
+                    display: "inline-block",
+                    padding: "10px 16px",
+                    borderRadius: 10,
+                    background: "#2563eb",
+                    color: "white",
+                    textDecoration: "none",
+                    fontWeight: 600,
+                  }}
+                >
+                  Sign in to save results
+                </Link>
+              )}
             </div>
           )}
 

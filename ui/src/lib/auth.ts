@@ -1,4 +1,14 @@
 // src/lib/auth.ts
+
+import { auth } from "@/firebase/firebase";
+export async function getAuthToken(): Promise<string | null> {
+  if (!auth) return null; // Auth not configured
+  
+  const user = auth.currentUser;
+  if (!user) return null;
+
+  return await user.getIdToken(true);
+}
 export type User = {
   email: string;
   username: string;
