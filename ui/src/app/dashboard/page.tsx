@@ -9,7 +9,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ProgressChart } from "@/components/ProgressChart";
-import { getWoundProfiles, getWoundProfile, seedPlaceholderData, getUserWounds, getWoundImages, createWoundProfile } from "@/lib/wounds";
+import {
+  getWoundProfiles,
+  getWoundProfile,
+  seedPlaceholderData,
+  getUserWounds,
+  getWoundImages,
+  createWoundProfile,
+} from "@/lib/wounds";
 import { Plus, Flame, Trophy, Target, ChevronRight, Camera } from "lucide-react";
 
 /**
@@ -158,10 +165,7 @@ export default function Dashboard() {
 
   async function loadProfileDetails(profileId: string) {
     try {
-      
       const images = await getWoundImages(profileId);
-
-     
       const imageOnly = (images || []).filter(
         (it: any) => (it.sk && it.sk.includes("#IMG#")) || it.imageKey
       );
@@ -260,10 +264,19 @@ export default function Dashboard() {
     const currentArea = Number(last.area_cm2 || 0);
     const areaReduction = initialArea - currentArea;
 
+    // NOTE: This is the original formula for healedPct.
+    // It keeps healed percentage at 0% (not negative) when the wound gets worse.
+    // const healedPct =
+    //   initialArea > 0
+    //     ? Math.max(0, Math.min(100, (areaReduction / initialArea) * 100))
+    //     : 0;
+
+    // NOTE: This is the modified formula for healedPct.
+    // It allows the healed percentage to go negative when the wound gets worse.
     const healedPct =
-      initialArea > 0
-        ? Math.max(0, Math.min(100, (areaReduction / initialArea) * 100))
-        : 0;
+    initialArea > 0
+      ? Math.min(100, (areaReduction / initialArea) * 100)
+      : 0;
 
     const msDay = 24 * 60 * 60 * 1000;
     const daysTracked = Math.max(
@@ -671,7 +684,8 @@ export default function Dashboard() {
               <div className="mt-3 h-2 w-full rounded-full bg-slate-200">
                 <div
                   className="h-2 rounded-full bg-blue-600 transition-all"
-                  style={{ width: `${Math.min(100, Math.max(0, healedPct))}%` }}
+                  // style={{ width: `${Math.min(100, Math.max(0, healedPct))}%` }}
+                  style={{ width: `${Math.min(100, healedPct)}%` }}
                 />
               </div>
             </div>

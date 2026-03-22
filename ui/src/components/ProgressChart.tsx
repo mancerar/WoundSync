@@ -1,25 +1,32 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { getAuthToken } from "@/lib/auth";
-
-const BACKEND_URL =
-  process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
+import { useEffect, useMemo, useState } from "react";
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  CartesianGrid,
+  Legend,
+} from "recharts";
+import { getWoundImages } from "@/lib/wounds";
 
 interface ChartData {
   dates: string[];
   area_cm2: number[];
-  length_cm: number[];
-  width_cm: number[];
   infection_risk: number[];
   redness_level: number[];
   record_count: number;
 }
 
+type ActiveMetric = "area" | "infection" | "redness";
+
 export function ProgressChart({ profileId }: { profileId: string }) {
   const [data, setData] = useState<ChartData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeMetric, setActiveMetric] = useState<"area" | "infection" | "redness">("area");
+  const [activeMetric, setActiveMetric] = useState<ActiveMetric>("area");
 
   useEffect(() => {
     loadChartData();
@@ -29,18 +36,68 @@ export function ProgressChart({ profileId }: { profileId: string }) {
   async function loadChartData() {
     try {
       setLoading(true);
-      const token = await getAuthToken();
-      const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
-      const response = await fetch(
-        `${BACKEND_URL}/api/charts/metrics/${encodeURIComponent(profileId)}`,
-        { headers }
+
+      // Use Dynamo-backed wound images for all chart metrics
+      const images = await getWoundImages(profileId);
+      const items = (images || []).filter(
+        (it: any) => (it.sk && it.sk.includes("#IMG#")) || it.imageKey
       );
-      const result = await response.json();
-      if (result?.ok) {
-        setData(result.data as ChartData);
-      } else {
+
+      if (!items.length) {
         setData(null);
+        return;
       }
+
+      const dates: string[] = [];
+      const areas: number[] = [];
+      const infectionRisk: number[] = [];
+      const rednessLevel: number[] = [];
+
+      // Sort oldest -> newest by timestamp / sk
+      const sorted = [...items].sort((a: any, b: any) => {
+        const aTs = a.timestamp || a.sk || "";
+        const bTs = b.timestamp || b.sk || "";
+        return new Date(aTs).getTime() - new Date(bTs).getTime();
+      });
+
+      for (const it of sorted) {
+        const recAt = it.timestamp || it.created_at || it.sk || new Date().toISOString();
+        const analysis = it.analysis || {};
+        const measurements = analysis.measurements || {};
+
+        // Area comes from analyzer measurements
+        const area = Number(measurements.area_cm2 ?? 0);
+
+        // Infection risk: derive from heuristic assessment.urgency ("home" | "soon" | "urgent")
+        const assessment = analysis.assessment || {};
+        const urgency: string | undefined = assessment.urgency;
+        let infectionNum = 1;
+        if (typeof urgency === "string") {
+          const v = urgency.toLowerCase();
+          if (v === "soon") infectionNum = 2;
+          else if (v === "urgent") infectionNum = 3;
+          else infectionNum = 1;
+        }
+
+        // Redness level: numeric 0–1 from color_analysis.redness_level
+        const colorAnalysis = analysis.color_analysis || {};
+        const rednessVal = Number(colorAnalysis.redness_level ?? 0);
+        // Keep as 0–1; charts use continuous domain
+        const rednessNum = Math.max(0, Math.min(1, rednessVal));
+
+        dates.push(recAt);
+        areas.push(area);
+        infectionRisk.push(infectionNum);
+        rednessLevel.push(rednessNum);
+      }
+
+      setData({
+        dates,
+        area_cm2: areas,
+        infection_risk: infectionRisk,
+        redness_level: rednessLevel,
+        record_count: dates.length,
+      });
     } catch (error) {
       console.error("Failed to load chart data:", error);
       setData(null);
@@ -48,6 +105,16 @@ export function ProgressChart({ profileId }: { profileId: string }) {
       setLoading(false);
     }
   }
+
+  const points = useMemo(() => {
+    if (!data || !data.dates?.length) return [];
+    return data.dates.map((d, i) => ({
+      date: d,
+      area: data.area_cm2[i],
+      infection: data.infection_risk[i],
+      redness: data.redness_level[i],
+    }));
+  }, [data]);
 
   if (loading) {
     return (
@@ -57,48 +124,45 @@ export function ProgressChart({ profileId }: { profileId: string }) {
     );
   }
 
-  if (!data || data.record_count < 2) {
+  if (!data || data.record_count < 2 || points.length < 2) {
     return (
       <div className="ws-card p-5">
-        <div className="text-center text-slate-500">Need at least 2 records to show trends</div>
+        <div className="text-center text-slate-500">
+          Need at least 2 records to show trends
+        </div>
       </div>
     );
   }
 
-  const getMetricData = () => {
-    switch (activeMetric) {
-      case "area":
-        return data.area_cm2;
-      case "infection":
-        return data.infection_risk;
-      case "redness":
-        return data.redness_level;
-      default:
-        return data.area_cm2;
-    }
+  const metricConfig: Record<
+    ActiveMetric,
+    { label: string; color: string; yDomain?: [number, number] }
+  > = {
+    area: {
+      label: "Wound Area (cm²)",
+      color: "#2563eb",
+    },
+    infection: {
+      label: "Infection Risk (1=Low, 3=High)",
+      color: "#dc2626",
+      yDomain: [1, 3],
+    },
+    redness: {
+      label: "Redness Level (1=Low, 3=High)",
+      color: "#ea580c",
+      yDomain: [1, 3],
+    },
   };
 
-  const getMetricLabel = () => {
-    switch (activeMetric) {
-      case "area":
-        return "Wound Area (cm²)";
-      case "infection":
-        return "Infection Risk Level";
-      case "redness":
-        return "Redness Level";
-      default:
-        return "Metric";
-    }
-  };
-
-  const metricData = getMetricData();
-  const maxValue = metricData.length ? Math.max(...metricData) : 0;
+  const config = metricConfig[activeMetric];
 
   return (
     <div className="ws-card p-5">
       <div className="mb-4">
-        <div className="text-lg font-semibold text-slate-800 mb-3">Progress Over Time</div>
-        <div className="flex gap-2">
+        <div className="text-lg font-semibold text-slate-800 mb-3">
+          Progress Over Time
+        </div>
+        <div className="flex flex-wrap gap-2">
           <button
             onClick={() => setActiveMetric("area")}
             className={`px-3 py-1 rounded text-sm font-medium ${
@@ -132,64 +196,55 @@ export function ProgressChart({ profileId }: { profileId: string }) {
         </div>
       </div>
 
-      <div className="mb-2 text-sm font-medium text-slate-600">{getMetricLabel()}</div>
+      <div className="mb-2 text-sm font-medium text-slate-600">
+        {config.label}
+      </div>
 
-      <div className="space-y-2">
-        {data.dates.map((date, index) => {
-          const value = metricData[index];
-          const percentage = maxValue > 0 ? (value / maxValue) * 100 : 0;
-          const isImproving = index > 0 && value < metricData[index - 1];
-
-          return (
-            <div key={index} className="flex items-center gap-2">
-              <div className="text-xs text-slate-500 w-24 flex-shrink-0">
-                {new Date(date).toLocaleDateString()}
-              </div>
-
-              <div className="flex-1 bg-slate-100 rounded-full h-8 relative overflow-hidden">
-                <div
-                  className={`h-full transition-all ${
-                    activeMetric === "area"
-                      ? isImproving
-                        ? "bg-green-500"
-                        : "bg-blue-500"
-                      : activeMetric === "infection"
-                      ? value === 1
-                        ? "bg-green-500"
-                        : value === 2
-                        ? "bg-yellow-500"
-                        : "bg-red-500"
-                      : value === 1
-                      ? "bg-green-500"
-                      : value === 2
-                      ? "bg-yellow-500"
-                      : "bg-red-500"
-                  }`}
-                  style={{ width: `${percentage}%` }}
-                />
-                <div className="absolute inset-0 flex items-center px-3 text-xs font-medium">
-                  {activeMetric === "area"
-                    ? `${value.toFixed(2)} cm²`
-                    : value === 1
-                    ? "Low"
-                    : value === 2
-                    ? "Moderate"
-                    : "High"}
-                </div>
-              </div>
-
-              {index > 0 && (
-                <div className="text-xs w-16 flex-shrink-0 text-right">
-                  {activeMetric === "area" ? (
-                    <span className={isImproving ? "text-green-600" : "text-red-600"}>
-                      {isImproving ? "↓" : "↑"} {Math.abs(value - metricData[index - 1]).toFixed(2)}
-                    </span>
-                  ) : null}
-                </div>
-              )}
-            </div>
-          );
-        })}
+      <div className="h-64 w-full">
+        <ResponsiveContainer width="100%" height="100%">
+          <LineChart data={points} margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
+            <XAxis
+              dataKey="date"
+              tickFormatter={(value) =>
+                new Date(value).toLocaleDateString(undefined, {
+                  month: "short",
+                  day: "numeric",
+                })
+              }
+              tick={{ fontSize: 11, fill: "#6b7280" }}
+            />
+            <YAxis
+              domain={config.yDomain}
+              tick={{ fontSize: 11, fill: "#6b7280" }}
+            />
+            <Tooltip
+              formatter={(value: any) =>
+                activeMetric === "area"
+                  ? [`${(value as number).toFixed(2)} cm²`, "Area"]
+                  : [value, activeMetric === "infection" ? "Infection" : "Redness"]
+              }
+              labelFormatter={(value) =>
+                new Date(value as string).toLocaleString()
+              }
+            />
+            <Legend />
+            <Line
+              type="monotone"
+              dataKey={
+                activeMetric === "area"
+                  ? "area"
+                  : activeMetric === "infection"
+                  ? "infection"
+                  : "redness"
+              }
+              stroke={config.color}
+              strokeWidth={2}
+              dot={{ r: 3 }}
+              activeDot={{ r: 5 }}
+            />
+          </LineChart>
+        </ResponsiveContainer>
       </div>
     </div>
   );

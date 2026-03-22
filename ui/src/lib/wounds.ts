@@ -17,7 +17,6 @@ async function readErrorBody(res: Response): Promise<string> {
 }
 
 export async function getWoundProfiles(): Promise<any[]> {
-  
   return await getUserWounds();
 }
 
