@@ -2,50 +2,81 @@
 
 import Image from "next/image";
 import Link from "next/link";
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { setUser } from "@/lib/auth";
 import { useAuth } from "@/app/providers/AuthProvider";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Mail, Lock, User as UserIcon } from "lucide-react";
+import { Mail, Lock, User as UserIcon, Eye, EyeOff } from "lucide-react";
 
 export default function Login() {
+  return (
+    <Suspense fallback={<div className="ws-container">Loading...</div>}>
+      <LoginContent />
+    </Suspense>
+  );
+}
+
+function LoginContent() {
   const [email, setEmail] = useState("");
   const [username, setUsername] = useState("");
   const [pw, setPw] = useState("");
+  const [showPw, setShowPw] = useState(false);
+  const [message, setMessage] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isResetSending, setIsResetSending] = useState(false);
   const router = useRouter();
-  const { signIn, authEnabled } = useAuth();
+  const searchParams = useSearchParams();
+  const { signIn, resetPassword, authEnabled } = useAuth();
+
+  useEffect(() => {
+    const emailFromQuery = searchParams.get("email") || "";
+    if (emailFromQuery && !email) {
+      setEmail(emailFromQuery);
+    }
+  }, [searchParams, email]);
 
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!email || !username) return alert("Enter email and username");
-    if (!pw) return alert("Enter password");
+    setMessage(null);
+    if (!email || !username) {
+      setMessage({ type: "error", text: "Please enter both your email and username." });
+      return;
+    }
+    if (!pw) {
+      setMessage({ type: "error", text: "Please enter your password to continue." });
+      return;
+    }
     
     // If Firebase auth is not enabled, use local fallback and navigate.
     if (!authEnabled) {
       setUser({ email, username });
+      setMessage({ type: "success", text: "Signed in successfully. Redirecting to your dashboard..." });
       router.replace("/dashboard");
       return;
     }
 
+    setIsSubmitting(true);
     
     signIn(email, pw)
       .then(() => {
         setUser({ email, username });
+        setMessage({ type: "success", text: "Welcome back to WoundSync. Redirecting..." });
         router.replace("/dashboard");
       })
       .catch((err) => {
-        console.error(err);
         const errorCode = err?.code;
         let errorMessage = "Sign in failed";
 
         if (errorCode === "auth/user-not-found" ) {
           errorMessage = "Account not found. Please create a new account.";
         } else if (errorCode === "auth/invalid-credential") {
-          errorMessage = "Incorrect password. Please try again.";
+          errorMessage = "Sign-in failed. Check your email/password, and make sure Email/Password sign-in is enabled in Firebase Authentication.";
         }else if (errorCode === "auth/wrong-password") {
           errorMessage = "Incorrect password. Please try again.";
+        } else if (errorCode === "auth/invalid-login-credentials") {
+          errorMessage = "Incorrect email or password. If needed, use Forgot Password to reset access.";
         } else if (errorCode === "auth/invalid-email") {
           errorMessage = "Invalid email address.";
         } else if (errorCode === "auth/too-many-requests") {
@@ -54,8 +85,54 @@ export default function Login() {
           errorMessage = err.message;
         }
 
-        alert(errorMessage);
+        setMessage({ type: "error", text: errorMessage });
+      })
+      .finally(() => {
+        setIsSubmitting(false);
       });
+  }
+
+  async function onForgotPassword() {
+    const targetEmail = (email || "").trim();
+    setMessage(null);
+    if (!targetEmail) {
+      setMessage({ type: "error", text: "Enter your email first, then select Forgot Password." });
+      return;
+    }
+
+    if (!authEnabled) {
+      setMessage({ type: "error", text: "Password reset is unavailable while Firebase auth is disabled." });
+      return;
+    }
+
+    setIsResetSending(true);
+    try {
+      await resetPassword(targetEmail);
+      setMessage({ type: "success", text: "Password reset email sent. Check your inbox (and spam) for the WoundSync reset link." });
+    } catch (err: unknown) {
+      const errorCode = (err as { code?: string })?.code;
+      let errorMessage = "Could not send reset email.";
+
+      if (errorCode === "auth/user-not-found") {
+        errorMessage = "No account found with that email. Please sign up first.";
+      } else if (errorCode === "auth/invalid-email") {
+        errorMessage = "Please enter a valid email address.";
+      } else if (errorCode === "auth/operation-not-allowed") {
+        errorMessage = "Email/Password sign-in is not enabled in Firebase Authentication. Enable it, then retry.";
+      } else if (errorCode === "auth/unauthorized-continue-uri") {
+        errorMessage = "Password reset redirect URL is not authorized in Firebase. Add localhost/your app domain under Authentication > Settings > Authorized domains.";
+      } else if (errorCode === "auth/network-request-failed") {
+        errorMessage = "Network error while sending reset email. Check your internet and retry.";
+      } else if (errorCode === "auth/too-many-requests") {
+        errorMessage = "Too many reset attempts. Please wait a bit and try again.";
+      } else if (typeof err === "object" && err && "message" in err && typeof (err as { message?: string }).message === "string") {
+        errorMessage = (err as { message: string }).message;
+      }
+
+      setMessage({ type: "error", text: errorMessage });
+    } finally {
+      setIsResetSending(false);
+    }
   }
 
   return (
@@ -93,6 +170,20 @@ export default function Login() {
         Log in
       </h2>
 
+      {message ? (
+        <div
+          className={`mt-4 rounded-xl border px-4 py-3 text-sm ${
+            message.type === "success"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+              : message.type === "error"
+                ? "border-red-200 bg-red-50 text-red-700"
+                : "border-blue-200 bg-blue-50 text-blue-700"
+          }`}
+        >
+          {message.text}
+        </div>
+      ) : null}
+
       {/* Form */}
       <form onSubmit={onSubmit} className="mt-4 space-y-4">
         <div className="relative">
@@ -124,20 +215,38 @@ export default function Login() {
         <div className="relative">
           <Lock className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
           <Input
-            className="h-12 rounded-xl pl-10 text-base"
-            type="password"
+            className="h-12 rounded-xl pl-10 pr-11 text-base"
+            type={showPw ? "text" : "password"}
             placeholder="Password"
             value={pw}
             onChange={(e) => setPw(e.target.value)}
           />
+          <button
+            type="button"
+            onClick={() => setShowPw((v) => !v)}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+            aria-label={showPw ? "Hide password" : "Show password"}
+          >
+            {showPw ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+          </button>
         </div>
 
         <Button
           type="submit"
           className="h-12 w-full rounded-xl text-base font-semibold"
+          disabled={isSubmitting}
         >
-          Continue
+          {isSubmitting ? "Signing in..." : "Continue"}
         </Button>
+
+        <button
+          type="button"
+          onClick={onForgotPassword}
+          className="text-sm font-medium text-blue-600 hover:underline disabled:cursor-not-allowed disabled:opacity-60"
+          disabled={isResetSending}
+        >
+          {isResetSending ? "Sending reset email..." : "Forgot Password?"}
+        </button>
       </form>
 
       {/* Auth link */}

@@ -3,7 +3,7 @@
 import React, { useMemo, useRef, useEffect, useState } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
-import { processAndUploadWound, predictOnly } from "@/lib/wounds";
+import { processAndUploadWound, predictOnly, createWoundProfile } from "@/lib/wounds";
 
 type PredictResponse = {
   ok: boolean;
@@ -114,7 +114,7 @@ type PredictResponse = {
 };
 
 const BACKEND_URL =
-  process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8001";
+  process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
 
 export default function CapturePage() {
@@ -124,6 +124,7 @@ export default function CapturePage() {
   const [previewUrl, setPreviewUrl] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<PredictResponse | null>(null);
+  const [woundName, setWoundName] = useState<string>("");
 
   // Follow-Up Chat state
   type ChatMsg = { role: "user" | "assistant"; content: string; model?: string; source?: string };
@@ -186,9 +187,14 @@ export default function CapturePage() {
     setResult(null);
 
     try {
-      const targetWoundId = woundId ?? "demo-wound";
+      // If no woundId in the URL, create a new wound profile with the typed name first
+      let targetWoundId = woundId;
+      if (!targetWoundId) {
+        const name = woundName.trim() || "My Wound";
+        targetWoundId = await createWoundProfile(name);
+      }
       const { analysis } = await processAndUploadWound(file, targetWoundId);
-      setResult(analysis as any); 
+      setResult(analysis as any);
     } catch (e: any) {
       const msg = e?.message || "Request failed";
       const authRequired = /not authenticated|sign in|sign-in|login|401/i.test(msg);
@@ -253,8 +259,33 @@ export default function CapturePage() {
       <Link href="/dashboard" style={{ display: "inline-block", color: "#2563eb", textDecoration: "none", fontWeight: 600, marginBottom: 12 }}>← Back to Dashboard</Link>
       <h2 style={{ marginBottom: 6 }}>Add photo</h2>
       <p style={{ color: "#666", marginBottom: 14 }}>
-        Adding to <strong>{woundId ? decodeURIComponent(woundId) : "your wound"}</strong>. We’ll analyze and save to this profile.
+        Adding to <strong>{woundId ? decodeURIComponent(woundId) : "a new wound"}</strong>. We'll analyze and save to this profile.
       </p>
+
+      {/* Wound name input — only shown when arriving directly (no woundId in URL) */}
+      {!woundId && (
+        <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
+          <label style={{ fontWeight: 600, color: "#333", whiteSpace: "nowrap" }}>
+            Wound name:
+          </label>
+          <input
+            type="text"
+            placeholder="e.g. Left knee scrape"
+            value={woundName}
+            onChange={(e) => setWoundName(e.target.value)}
+            style={{
+              padding: "8px 12px",
+              borderRadius: 8,
+              border: "1px solid #bbb",
+              fontSize: 14,
+              width: 260,
+            }}
+          />
+          <span style={{ fontSize: 12, color: "#888" }}>
+            (optional — defaults to "My Wound")
+          </span>
+        </div>
+      )}
       {/* old description removed */}
       <div style={{ display: "none" }}>
         Upload a photo. Guidance is based on shape + visual cues (not “size in

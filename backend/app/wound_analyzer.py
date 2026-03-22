@@ -136,7 +136,7 @@ class WoundAnalyzer:
             merged_color_analysis = {**color_analysis, **enhanced_color_analysis}
             
             # Generate healing assessment (pass merged so post-processor gets color_percentages)
-            healing_assessment = self._assess_healing(measurements, merged_color_analysis)
+            healing_assessment = self._assess_healing(measurements, merged_color_analysis, image_path=image_path)
             
             # Generate visual output if requested
             visual_output_path = None
@@ -860,7 +860,7 @@ class WoundAnalyzer:
             "darkness_level": round(darkness_level, 2)
         }
     
-    def _assess_healing(self, measurements: Dict, color_analysis: Dict) -> Dict:
+    def _assess_healing(self, measurements: Dict, color_analysis: Dict, image_path: Optional[str] = None) -> Dict:
         """Assess wound healing status using AI when available, rules as fallback."""
 
         # ==== TRY AI FIRST — returns complete structured result if successful ====
@@ -869,6 +869,7 @@ class WoundAnalyzer:
                 ai_result = self.ai_feedback.generate_full_assessment({
                     'measurements': measurements,
                     'color_analysis': color_analysis,
+                    'image_path': image_path,
                 })
                 if ai_result:
                     print(f"[AI Feedback] Generated using: {ai_result.get('assessment_method', 'unknown')}")
@@ -1299,7 +1300,7 @@ class WoundAnalyzer:
         return assessment
 
 
-def analyze_wound_image(image_path: str, pixels_per_cm: float = 45.0, save_visual: bool = True, output_dir: str = "output") -> Dict:
+def analyze_wound_image(image_path: str, pixels_per_cm: float = 45.0, save_visual: bool = True, output_dir: str = "output", use_ai_feedback: bool = False) -> Dict:
     """
     Convenience function to analyze a wound image.
     
@@ -1308,23 +1309,20 @@ def analyze_wound_image(image_path: str, pixels_per_cm: float = 45.0, save_visua
         pixels_per_cm: Conversion factor from pixels to centimeters
         save_visual: Whether to save visual output with bounding boxes
         output_dir: Directory to save visual outputs
+        use_ai_feedback: Whether to use Ollama AI for enhanced feedback (slow on CPU)
         
     Returns:
         Dictionary containing complete wound analysis
     """
     # Prefer Roboflow (cloud) if configured, else local ML checkpoint, else CV analyzer
-    rf = get_roboflow_config()
+    # NOTE: Skip RoboflowWoundAnalyzer here — main.py already makes one Roboflow API
+    # call for detection/bbox. Making a second call here for segmentation doubles the
+    # latency. Use the local ML model or fast CV-based analyzer instead.
     default_model_path = (Path(__file__).resolve().parents[1] / "models" / "tiny_wound_model.pt")
-    if rf.get("api_key") and rf.get("model_id"):
-        try:
-            analyzer = RoboflowWoundAnalyzer(pixels_per_cm=pixels_per_cm)
-        except Exception:
-            # If Roboflow init fails, fall back to local model / CV
-            analyzer = MLWoundAnalyzer(model_path=str(default_model_path), pixels_per_cm=pixels_per_cm) if default_model_path.exists() else WoundAnalyzer(pixels_per_cm=pixels_per_cm)
-    elif default_model_path.exists():
-        analyzer = MLWoundAnalyzer(model_path=str(default_model_path), pixels_per_cm=pixels_per_cm)
+    if default_model_path.exists():
+        analyzer = MLWoundAnalyzer(model_path=str(default_model_path), pixels_per_cm=pixels_per_cm, use_ai_feedback=use_ai_feedback)
     else:
-        analyzer = WoundAnalyzer(pixels_per_cm=pixels_per_cm)
+        analyzer = WoundAnalyzer(pixels_per_cm=pixels_per_cm, use_ai_feedback=use_ai_feedback)
     result = analyzer.analyze_wound(image_path, save_visual=save_visual, output_dir=output_dir)
     
     # Auto-print results to console

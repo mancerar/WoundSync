@@ -6,36 +6,49 @@ import { useAuth } from "@/app/providers/AuthProvider";
 import Link from "next/link";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Mail, Lock, User as UserIcon } from "lucide-react";
+import { Mail, Lock, User as UserIcon, Eye, EyeOff } from "lucide-react";
 
 export default function Signup() {
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
+  const [showPw, setShowPw] = useState(false);
+  const [message, setMessage] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const router = useRouter();
-  const { signUp } = useAuth();
+  const { signUp, authEnabled } = useAuth();
 
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    if (!username || !email || pw.length < 8)
-      return alert("Enter username, email & 8+ char password");
+    setMessage(null);
+    if (!username || !email || pw.length < 8) {
+      setMessage({ type: "error", text: "Please enter username, email, and a password with at least 8 characters." });
+      return;
+    }
     
-    // FIREBASE AUTHENTICATION - COMMENTED OUT FOR NOW
-    // Uncomment this block when Firebase is configured
-    
+    if (!authEnabled) {
+      setUser({ email, username });
+      setMessage({ type: "success", text: "Account created successfully. Welcome to WoundSync!" });
+      router.replace("/dashboard");
+      return;
+    }
+
+    setIsSubmitting(true);
     signUp(email, pw)
       .then(() => {
         setUser({ email, username });
-        alert("Account created successfully! Welcome to WoundSync.");
+        setMessage({ type: "success", text: "Account created successfully. Welcome to WoundSync!" });
         router.replace("/dashboard");
       })
       .catch((err) => {
-        console.error(err);
         const errorCode = err?.code;
         let errorMessage = "Sign up failed";
         
         if (errorCode === "auth/email-already-in-use") {
-          errorMessage = "This email is already registered. Please log in instead.";
+          errorMessage = "This email is already registered. Redirecting you to login...";
+          setMessage({ type: "info", text: errorMessage });
+          router.replace(`/?email=${encodeURIComponent(email)}`);
+          return;
         } else if (errorCode === "auth/invalid-email") {
           errorMessage = "Invalid email address.";
         } else if (errorCode === "auth/weak-password") {
@@ -44,14 +57,11 @@ export default function Signup() {
           errorMessage = err.message;
         }
         
-        alert(errorMessage);
+        setMessage({ type: "error", text: errorMessage });
+      })
+      .finally(() => {
+        setIsSubmitting(false);
       });
-    
-    
-    // Temporary local-only signup (no Firebase)
-    setUser({ email, username });
-    alert("Account created successfully! Welcome to WoundSync.");
-    router.replace("/dashboard");
   }
 
   return (
@@ -64,6 +74,20 @@ export default function Signup() {
           It takes less than a minute
         </p>
       </div>
+
+      {message ? (
+        <div
+          className={`mt-4 rounded-xl border px-4 py-3 text-sm ${
+            message.type === "success"
+              ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+              : message.type === "error"
+                ? "border-red-200 bg-red-50 text-red-700"
+                : "border-blue-200 bg-blue-50 text-blue-700"
+          }`}
+        >
+          {message.text}
+        </div>
+      ) : null}
 
       {/* Form */}
       <form onSubmit={onSubmit} className="mt-6 space-y-4">
@@ -96,16 +120,24 @@ export default function Signup() {
         <div className="relative">
           <Lock className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
           <Input
-            className="h-12 rounded-xl pl-10 text-base"
-            type="password"
+            className="h-12 rounded-xl pl-10 pr-11 text-base"
+            type={showPw ? "text" : "password"}
             placeholder="Password (min 8 chars)"
             value={pw}
             onChange={(e) => setPw(e.target.value)}
           />
+          <button
+            type="button"
+            onClick={() => setShowPw((v) => !v)}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+            aria-label={showPw ? "Hide password" : "Show password"}
+          >
+            {showPw ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+          </button>
         </div>
 
-        <Button type="submit" className="h-12 w-full rounded-xl text-base font-semibold">
-          Create account
+        <Button type="submit" className="h-12 w-full rounded-xl text-base font-semibold" disabled={isSubmitting}>
+          {isSubmitting ? "Creating account..." : "Create account"}
         </Button>
       </form>
 

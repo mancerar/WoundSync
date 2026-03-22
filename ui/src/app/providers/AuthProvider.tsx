@@ -11,6 +11,8 @@ import {
   onAuthStateChanged,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
+  sendPasswordResetEmail,
+  type ActionCodeSettings,
   signOut as fbSignOut,
 } from "firebase/auth";
 
@@ -24,6 +26,7 @@ type AuthContextType = {
   loading: boolean;
   signIn: (email: string, password: string) => Promise<void>;
   signUp: (email: string, password: string) => Promise<void>;
+  resetPassword: (email: string) => Promise<void>;
   signOut: () => Promise<void>;
   getToken: () => Promise<string | null>;
   authEnabled: boolean;
@@ -78,6 +81,22 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
       await createUserWithEmailAndPassword(auth!, email, password);
     };
 
+    const resetPassword = async (email: string) => {
+      if (!authEnabled) {
+        throw new Error("Password reset email is unavailable while Firebase auth is disabled.");
+      }
+
+      const configuredBase = process.env.NEXT_PUBLIC_PASSWORD_RESET_URL?.trim();
+      const runtimeBase = typeof window !== "undefined" ? window.location.origin : "";
+      const baseUrl = (configuredBase || runtimeBase || "http://localhost:3000").replace(/\/$/, "");
+      const actionCodeSettings: ActionCodeSettings = {
+        url: `${baseUrl}/reset-password`,
+        handleCodeInApp: false,
+      };
+
+      await sendPasswordResetEmail(auth!, email, actionCodeSettings);
+    };
+
     const getToken = async () => {
     if (!authEnabled || !auth?.currentUser) return null;
       return await auth.currentUser.getIdToken();
@@ -91,7 +110,7 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
       await fbSignOut(auth!);
     };
 
-    return { user, loading, signIn, signUp, signOut, getToken, authEnabled };
+    return { user, loading, signIn, signUp, resetPassword, signOut, getToken, authEnabled };
   }, [authEnabled, user, loading]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -63,14 +63,30 @@ export async function seedPlaceholderData(): Promise<void> {
 export async function predictOnly(file: File): Promise<any> {
   const formData = new FormData();
   formData.append("image", file);
-  const res = await fetch(`${BACKEND_URL}/predict`, {
-    method: "POST",
-    body: formData,
-  });
-  if (!res.ok) {
-    throw new Error(`Predict failed (${res.status}): ${await readErrorBody(res)}`);
+  
+  // Create AbortController for timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout
+  
+  try {
+    const res = await fetch(`${BACKEND_URL}/predict`, {
+      method: "POST",
+      body: formData,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    
+    if (!res.ok) {
+      throw new Error(`Predict failed (${res.status}): ${await readErrorBody(res)}`);
+    }
+    return res.json();
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new Error('Analysis timed out after 60 seconds. Please try again with a smaller image.');
+    }
+    throw err;
   }
-  return res.json();
 }
 
 export async function processAndUploadWound(
@@ -86,81 +102,104 @@ export async function processAndUploadWound(
   const formData = new FormData();
   formData.append("image", file);
 
-  const predictRes = await fetch(
-    `${BACKEND_URL}/predict`,
-    {
-      method: "POST",
-      body: formData,
-    }
-  );
-
-  if (!predictRes.ok) {
-    throw new Error(`Predict failed (${predictRes.status}): ${await readErrorBody(predictRes)}`);
-  }
-  const predictData = await predictRes.json();
-
-  if (!predictData.detected) {
-    throw new Error("No wound detected");
-  }
-
-  // THen Get S3 Upload URL
-
-  const uploadUrlRes = await fetch(
-    `${BACKEND_URL}/wounds/${woundId}/upload-url?content_type=${encodeURIComponent(
-      file.type || "image/jpeg"
-    )}`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-      },
-    }
-  );
-
-  if (!uploadUrlRes.ok) {
-    throw new Error(`upload-url failed (${uploadUrlRes.status}): ${await readErrorBody(uploadUrlRes)}`);
-  }
-  const { uploadUrl, imageKey } = await uploadUrlRes.json();
-  if (!uploadUrl || !imageKey) {
-    throw new Error("upload-url did not return uploadUrl/imageKey");
-  }
-
-  // then Upload Image to S3
-
-  const s3PutRes = await fetch(uploadUrl, {
-    method: "PUT",
-    headers: {
-      "Content-Type": file.type || "image/jpeg",
-    },
-    body: file,
-  });
-  if (!s3PutRes.ok) {
-    throw new Error(`S3 PUT failed (${s3PutRes.status})`);
-  }
-
-  //Save Metadata to DynamoDB
+  // Create AbortController for timeout
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 60000); // 60 second timeout
   
-  const metaRes = await fetch(`${BACKEND_URL}/wounds/${woundId}/images`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({
-      imageKey,
-      timestamp: new Date().toISOString(),
-      healingScore: predictData.healing_assessment?.score ?? 0,
-      analysis: predictData,
-    }),
-  });
-  if (!metaRes.ok) {
-    throw new Error(`Dynamo save failed (${metaRes.status}): ${await readErrorBody(metaRes)}`);
-  }
+  try {
+    const predictRes = await fetch(
+      `${BACKEND_URL}/predict`,
+      {
+        method: "POST",
+        body: formData,
+        signal: controller.signal,
+      }
+    );
+    clearTimeout(timeoutId);
 
-  return {
-    success: true,
-    analysis: predictData,
-  };
+    if (!predictRes.ok) {
+      throw new Error(`Predict failed (${predictRes.status}): ${await readErrorBody(predictRes)}`);
+    }
+    const predictData = await predictRes.json();
+
+    // Analysis succeeded — try to save to S3/DynamoDB but don't block results
+    try {
+      const uploadUrlRes = await fetch(
+        `${BACKEND_URL}/wounds/${woundId}/upload-url?content_type=${encodeURIComponent(
+          file.type || "image/jpeg"
+        )}`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+        }
+      );
+
+      if (uploadUrlRes.ok) {
+        const { uploadUrl, imageKey } = await uploadUrlRes.json();
+        if (imageKey) {
+          // Upload image to S3 only when a presigned URL is available
+          if (uploadUrl) {
+            await fetch(uploadUrl, {
+              method: "PUT",
+              headers: { "Content-Type": file.type || "image/jpeg" },
+              body: file,
+            });
+          }
+
+          // Ensure there's always a saved image.
+          // If the backend didn't produce an annotated image, fall back to the
+          // original file encoded as base64 so the thumbnail is never blank.
+          let analysisToSave = predictData;
+          if (!predictData.annotated_image) {
+            try {
+              const imgBase64 = await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                  const result = reader.result as string;
+                  // strip "data:image/jpeg;base64," prefix
+                  resolve(result.includes(",") ? result.split(",")[1] : result);
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(file);
+              });
+              analysisToSave = { ...predictData, annotated_image: imgBase64 };
+            } catch {
+              // ignore – proceed without image
+            }
+          }
+
+          // Always save metadata (SQLite locally, DynamoDB when AWS is configured)
+          await fetch(`${BACKEND_URL}/wounds/${woundId}/images`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify({
+              imageKey,
+              timestamp: new Date().toISOString(),
+              healingScore: predictData.healing_assessment?.score ?? 0,
+              analysis: analysisToSave,
+            }),
+          });
+        }
+      }
+    } catch {
+      // S3/DynamoDB not configured — still return analysis results
+      console.warn("Cloud save skipped (S3/DynamoDB not configured)");
+    }
+
+    return {
+      success: true,
+      analysis: predictData,
+    };
+  } catch (err: any) {
+    clearTimeout(timeoutId);
+    if (err.name === 'AbortError') {
+      throw new Error('Analysis timed out after 60 seconds. Please try again with a smaller image.');
+    }
+    throw err;
+  }
 }
 
 export async function getUserWounds(): Promise<any[]> {
@@ -210,5 +249,18 @@ export async function getWoundImages(woundId: string): Promise<any[]> {
   } catch (err) {
     console.error("getWoundImages error", err);
     return [];
+  }
+}
+
+export async function deleteWound(woundId: string): Promise<void> {
+  const token = await getAuthToken();
+  if (!token) throw new Error("Not authenticated");
+  const res = await fetch(`${BACKEND_URL}/wounds/${encodeURIComponent(woundId)}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    const body = await readErrorBody(res);
+    throw new Error(`Delete wound failed (${res.status}): ${body}`);
   }
 }

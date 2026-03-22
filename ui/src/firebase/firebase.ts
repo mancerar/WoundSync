@@ -11,11 +11,20 @@ const firebaseConfig = {
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
 };
 
-const hasFirebaseConfig = Boolean(firebaseConfig.apiKey && firebaseConfig.projectId);
+const envTrue = (v?: string) => (v || "").trim().toLowerCase() === "true";
+const isPlaceholder = (v?: string) => !v || v.startsWith("your_") || v === "";
+const forceDisableAuth = envTrue(process.env.NEXT_PUBLIC_DISABLE_FIREBASE_AUTH);
+const hasFirebaseConfig =
+  !isPlaceholder(firebaseConfig.apiKey) &&
+  !isPlaceholder(firebaseConfig.projectId) &&
+  !isPlaceholder(firebaseConfig.authDomain) &&
+  !isPlaceholder(firebaseConfig.appId);
 
 let auth: Auth | null = null;
 
-if (hasFirebaseConfig) {
+if (forceDisableAuth) {
+  console.warn("Firebase auth disabled via NEXT_PUBLIC_DISABLE_FIREBASE_AUTH=true");
+} else if (hasFirebaseConfig) {
   const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
   auth = getAuth(app);
 } else {

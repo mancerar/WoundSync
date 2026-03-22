@@ -416,17 +416,16 @@ export default function Dashboard() {
               const streak = profile.streak ?? 0;
               const badgeCount = profile.achievement_count ?? 0;
 
+              const isSelected = selectedProfile?.id === profile.id;
               return (
-                <button
+                <div
                   key={profile.id}
-                  onClick={() => loadProfileDetails(profile.id)}
-                  className={`text-left p-4 rounded-xl border-2 transition-all hover:shadow-md flex items-center justify-between gap-3 ${
-                    selectedProfile?.id === profile.id
-                      ? "border-blue-500 bg-blue-50 ring-2 ring-blue-200"
-                      : "border-slate-200 bg-white hover:border-blue-300"
+                  className={`text-left p-4 rounded-xl border-2 transition-all hover:shadow-md flex items-center justify-between gap-3 bg-white cursor-pointer ${
+                    isSelected ? "border-blue-500 ring-1 ring-blue-300" : "border-slate-200 hover:border-blue-300"
                   }`}
+                  onClick={() => loadProfileDetails(profile.id)}
                 >
-                  <div className="min-w-0">
+                  <div className="min-w-0 flex-1">
                     <div className="font-semibold text-slate-800 truncate">{profile.name}</div>
                     {profile.location ? (
                       <div className="text-sm text-slate-500 mt-0.5">{profile.location}</div>
@@ -449,22 +448,25 @@ export default function Dashboard() {
                       )}
                     </div>
                   </div>
-                  <ChevronRight
-                    className={`h-5 w-5 flex-shrink-0 text-slate-400 ${
-                      selectedProfile?.id === profile.id ? "text-blue-600" : ""
-                    }`}
-                  />
-                </button>
+                  <Link
+                    href={`/wounds/${encodeURIComponent(profile.id)}`}
+                    onClick={(e) => e.stopPropagation()}
+                    className="flex-shrink-0 p-1 rounded hover:bg-slate-100"
+                    title="View full history"
+                  >
+                    <ChevronRight className="h-5 w-5 text-slate-400" />
+                  </Link>
+                </div>
               );
             })}
           </div>
         )}
       </div>
 
-      {!selectedProfile && profiles.length > 0 && (
+      {profiles.length > 0 && !selectedProfile && (
         <div className="ws-card p-5 border-dashed border-2 border-slate-200 bg-slate-50/50">
           <p className="text-slate-600 text-center py-2">
-            👆 Select a wound above to see details, photos, and add new ones.
+            👆 Click a wound above to view its records. Use the arrow to open its full history page.
           </p>
         </div>
       )}

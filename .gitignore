@@ -209,6 +209,8 @@ __marimo__/
 backend/app/uploads/
 backend/uploads/
 
-firebase-service-account.json 
+firebase-service-account.json
+backend/app/firebase-service-account*.json
+backend/*.service-account.json
  
  

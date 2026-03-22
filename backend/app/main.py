@@ -39,12 +39,12 @@ except ImportError as e:
     analyze_wound_image = None
 
 # Import database and models
-from .database import Base, db_engine
+from .database import Base, db_engine, Session as LocalSession, LocalWound, LocalWoundImage
 from .models import WoundProfile, WoundRecord
 from .routes import router as profile_router
 from .charts import router as charts_router
 
-# Create database tables
+# Create database tables (creates local_wounds + local_wound_images too)
 Base.metadata.create_all(bind=db_engine)
 logger.info("✓ Database tables created")
 
@@ -658,6 +658,13 @@ dynamodb = boto3.resource(
 
 DYNAMODB_TABLE = os.getenv("DYNAMODB_TABLE", "WoundSyncData").strip() or "WoundSyncData"
 
+# Helper: True only when real AWS credentials + bucket are present
+def _aws_configured() -> bool:
+    return bool(
+        os.getenv("AWS_ACCESS_KEY_ID", "").strip()
+        and os.getenv("S3_BUCKET", "").strip()
+    )
+
 @app.get("/test-s3")
 def test_s3():
     response = s3.list_objects_v2(Bucket=BUCKET_NAME)
@@ -671,68 +678,85 @@ def health():
 def generate_upload_url(
     wound_id: str,
     content_type: str = Query("image/jpeg"),
-    #uid="demo-user"
-    uid:str = Depends(require_auth)
+    uid: str = Depends(require_auth)
 ):
     if not isinstance(content_type, str) or not content_type.strip():
         content_type = "image/jpeg"
     content_type = content_type.strip()
-    key = f"{uid}/{wound_id}/{datetime.now(timezone.utc).isoformat()}.jpg"
+    ts = datetime.now(timezone.utc).isoformat()
+    key = f"{uid}/{wound_id}/{ts}.jpg"
+
+    # Local fallback — skip S3, just return a local imageKey
+    if not _aws_configured():
+        return {"uploadUrl": None, "imageKey": f"local:{key}"}
 
     upload_url = s3.generate_presigned_url(
         "put_object",
-        Params={
-            "Bucket": BUCKET_NAME,
-            "Key": key,
-            "ContentType": content_type
-        },
+        Params={"Bucket": BUCKET_NAME, "Key": key, "ContentType": content_type},
         ExpiresIn=300
     )
-
-    return {
-        "uploadUrl": upload_url,
-        "imageKey": key
-    }
+    return {"uploadUrl": upload_url, "imageKey": key}
     
 @app.post("/wounds/{wound_id}/images")
 def save_wound_metadata(
     wound_id: str,
     body: dict,
-    #uid="demo-user"
     uid: str = Depends(require_auth)
 ):
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+
+    ts = body.get("timestamp", datetime.now(timezone.utc).isoformat())
+    image_key = body.get("imageKey") or f"local:{uid}/{wound_id}/{ts}.jpg"
+    healing_score = float(body.get("healingScore", 0))
+    analysis_data = body.get("analysis", {})
+    # Extract the annotated image (base64) produced by /predict and stored in the analysis blob
+    annotated_image = analysis_data.pop("annotated_image", None) if isinstance(analysis_data, dict) else None
+
+    # ── Local SQLite fallback ──────────────────────────────────────────────
+    if not _aws_configured():
+        try:
+            db = LocalSession()
+            # Ensure the wound profile exists
+            existing = db.query(LocalWound).filter_by(wound_id=wound_id, user_id=uid).first()
+            if not existing:
+                db.add(LocalWound(wound_id=wound_id, user_id=uid, name=wound_id, timestamp=ts))
+
+            db.add(LocalWoundImage(
+                image_id=image_key,
+                user_id=uid,
+                wound_id=wound_id,
+                timestamp=ts,
+                healing_score=healing_score,
+                analysis=json.dumps(analysis_data),
+                image_data=annotated_image,
+            ))
+            db.commit()
+            db.close()
+            logger.info(f"✓ Saved wound image locally for wound={wound_id} user={uid}")
+            return {"ok": True}
+        except Exception as e:
+            logger.error(f"Local wound image save error: {e}")
+            return {"ok": False, "error": str(e)}
+
+    # ── AWS DynamoDB path ──────────────────────────────────────────────────
     try:
         table = dynamodb.Table(DYNAMODB_TABLE)
-        if not isinstance(body, dict):
-            raise HTTPException(status_code=400, detail="Body must be a JSON object")
-        if "imageKey" not in body or not body.get("imageKey"):
-            raise HTTPException(status_code=400, detail="Missing required field: imageKey")
-
         clean_body = json.loads(json.dumps(body), parse_float=Decimal)
-
-        ts = clean_body.get("timestamp", datetime.now().isoformat())
         sk_value = clean_body.get("sk") or f"WOUND#{wound_id}#IMG#{ts}"
-
         item = {
             "userId": uid,
             "woundId": wound_id,
             "sk": sk_value,
             "timestamp": ts,
-            "imageKey": clean_body["imageKey"],
-            "healingScore": clean_body.get("healingScore", Decimal("0")),
+            "imageKey": image_key,
+            "healingScore": Decimal(str(healing_score)),
             "analysis": clean_body.get("analysis", {}),
         }
-
-        print("ITEM BEING SAVED:", item)
-
-        response = table.put_item(Item=item)
-
-        print("DYNAMO RESPONSE:", response)
-
+        table.put_item(Item=item)
         return {"ok": True}
-
     except Exception as e:
-        print("🔥 DYNAMO ERROR:", str(e))
+        logger.error(f"DynamoDB save error: {e}")
         return {"error": str(e)}
 
 
@@ -745,22 +769,27 @@ def create_wound_profile(
     body: Optional[CreateWoundBody] = None,
     uid: str = Depends(require_auth),
 ):
-    
+    name = (body.name if body else None) or "New wound"
+    slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in name.strip())[:50] or "wound"
+    wound_id = f"{slug}-{uuid.uuid4().hex[:8]}"
+    ts = datetime.now(timezone.utc).isoformat()
+
+    # ── Local SQLite fallback ──────────────────────────────────────────────
+    if not _aws_configured():
+        try:
+            db = LocalSession()
+            db.add(LocalWound(wound_id=wound_id, user_id=uid, name=name[:200], timestamp=ts))
+            db.commit()
+            db.close()
+            return {"ok": True, "woundId": wound_id}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ── AWS DynamoDB path ──────────────────────────────────────────────────
     try:
         table = dynamodb.Table(DYNAMODB_TABLE)
-        name = (body.name if body else None) or "New wound"
-        slug = "".join(c if c.isalnum() or c in "-_" else "-" for c in name.strip())[:50] or "wound"
-        wound_id = f"{slug}-{uuid.uuid4().hex[:8]}"
-        ts = datetime.now(timezone.utc).isoformat()
         sk_value = f"WOUND#{wound_id}#PROFILE"
-
-        item = {
-            "userId": uid,
-            "woundId": wound_id,
-            "sk": sk_value,
-            "timestamp": ts,
-            "name": name[:200],
-        }
+        item = {"userId": uid, "woundId": wound_id, "sk": sk_value, "timestamp": ts, "name": name[:200]}
         table.put_item(Item=item)
         return {"ok": True, "woundId": wound_id}
     except Exception as e:
@@ -769,6 +798,43 @@ def create_wound_profile(
 
 @app.get("/wounds")
 def list_user_wounds(uid: str = Depends(require_auth)):
+    # ── Local SQLite fallback ──────────────────────────────────────────────
+    if not _aws_configured():
+        try:
+            db = LocalSession()
+            local_wounds = db.query(LocalWound).filter_by(user_id=uid).all()
+            wounds = {}
+            for w in local_wounds:
+                wounds[w.wound_id] = {
+                    "id": w.wound_id,
+                    "name": w.name,
+                    "image_count": 0,
+                    "last_timestamp": w.timestamp,
+                    "last_imageKey": None,
+                }
+            # Augment with image counts
+            local_images = db.query(LocalWoundImage).filter_by(user_id=uid).all()
+            for img in local_images:
+                if img.wound_id in wounds:
+                    wounds[img.wound_id]["image_count"] += 1
+                    if not wounds[img.wound_id]["last_timestamp"] or img.timestamp > wounds[img.wound_id]["last_timestamp"]:
+                        wounds[img.wound_id]["last_timestamp"] = img.timestamp
+                        wounds[img.wound_id]["last_imageKey"] = img.image_id
+                else:
+                    # Image exists without a wound profile — create virtual entry
+                    wounds[img.wound_id] = {
+                        "id": img.wound_id,
+                        "name": img.wound_id,
+                        "image_count": 1,
+                        "last_timestamp": img.timestamp,
+                        "last_imageKey": img.image_id,
+                    }
+            db.close()
+            return {"ok": True, "wounds": list(wounds.values())}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ── AWS DynamoDB path ──────────────────────────────────────────────────
     try:
         table = dynamodb.Table(DYNAMODB_TABLE)
         items = []
@@ -777,7 +843,6 @@ def list_user_wounds(uid: str = Depends(require_auth)):
                 KeyConditionExpression=Key("userId").eq(uid) & Key("sk").begins_with("WOUND#")
             )
             items = resp.get("Items", [])
-
             while "LastEvaluatedKey" in resp:
                 resp = table.query(
                     KeyConditionExpression=Key("userId").eq(uid) & Key("sk").begins_with("WOUND#"),
@@ -785,10 +850,9 @@ def list_user_wounds(uid: str = Depends(require_auth)):
                 )
                 items.extend(resp.get("Items", []))
         except Exception as qerr:
-            logger.warning(f"Query by userId failed (table key may differ): {qerr}")
+            logger.warning(f"Query by userId failed: {qerr}")
             items = []
 
-        
         if not items:
             from boto3.dynamodb.conditions import Attr
             resp = table.scan(FilterExpression=Attr("userId").eq(uid) & Attr("sk").begins_with("WOUND#"))
@@ -797,49 +861,65 @@ def list_user_wounds(uid: str = Depends(require_auth)):
                 resp = table.scan(FilterExpression=Attr("userId").eq(uid) & Attr("sk").begins_with("WOUND#"), ExclusiveStartKey=resp.get("LastEvaluatedKey"))
                 items.extend(resp.get("Items", []))
 
-        
         wounds = {}
-
         for it in items:
             wid = it.get("woundId")
             ts = it.get("timestamp") or it.get("sk")
             sk = it.get("sk") or ""
-
             if not wid:
                 continue
-
-            entry = wounds.setdefault(
-                wid,
-                {"id": wid, "name": wid, "image_count": 0, "last_timestamp": None, "last_imageKey": None}
-            )
-
+            entry = wounds.setdefault(wid, {"id": wid, "name": wid, "image_count": 0, "last_timestamp": None, "last_imageKey": None})
             if "#IMG#" in sk or it.get("imageKey"):
                 entry["image_count"] += 1
                 if ts and (entry["last_timestamp"] is None or ts > entry["last_timestamp"]):
                     entry["last_timestamp"] = ts
                     entry["last_imageKey"] = it.get("imageKey")
             else:
-               
                 if it.get("name"):
                     entry["name"] = it["name"]
                 if entry["last_timestamp"] is None and ts:
                     entry["last_timestamp"] = ts
-
-        
-        try:
-            logger.info(f"/wounds raw items count={len(items)}; aggregated wounds={len(wounds)}")
-            sample = list(wounds.values())[:5]
-            logger.info(f"/wounds sample aggregated: {sample}")
-        except Exception:
-            pass
-
         return {"ok": True, "wounds": list(wounds.values())}
-
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 @app.get("/wounds/{wound_id}/images")
 def list_wound_images(wound_id: str, uid: str = Depends(require_auth)):
-    
+    # ── Local SQLite fallback ──────────────────────────────────────────────
+    if not _aws_configured():
+        try:
+            db = LocalSession()
+            rows = (
+                db.query(LocalWoundImage)
+                .filter_by(user_id=uid, wound_id=wound_id)
+                .order_by(LocalWoundImage.timestamp.desc())
+                .all()
+            )
+            db.close()
+            images = []
+            for r in rows:
+                try:
+                    analysis_data = json.loads(r.analysis) if r.analysis else {}
+                except Exception:
+                    analysis_data = {}
+                # Build a data-URI so the dashboard can render the thumbnail directly
+                view_url = None
+                if r.image_data:
+                    view_url = f"data:image/jpeg;base64,{r.image_data}"
+                images.append({
+                    "imageId":      r.image_id,
+                    "woundId":      r.wound_id,
+                    "userId":       r.user_id,
+                    "imageKey":     r.image_id,
+                    "timestamp":    r.timestamp,
+                    "healingScore": r.healing_score,
+                    "analysis":     analysis_data,
+                    "viewUrl":      view_url,
+                })
+            return {"ok": True, "images": images}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ── AWS DynamoDB path ──────────────────────────────────────────────────
     try:
         table = dynamodb.Table(DYNAMODB_TABLE)
         from boto3.dynamodb.conditions import Attr
@@ -850,13 +930,11 @@ def list_wound_images(wound_id: str, uid: str = Depends(require_auth)):
             resp = table.scan(FilterExpression=Attr("userId").eq(uid) & Attr("woundId").eq(wound_id), ExclusiveStartKey=resp.get("LastEvaluatedKey"))
             items.extend(resp.get("Items", []))
 
-       
         def sort_key(itm):
             return itm.get("timestamp") or itm.get("created_at") or itm.get("sk") or ""
 
         items_sorted = sorted(items, key=sort_key, reverse=True)
 
-       
         for it in items_sorted:
             key = it.get("imageKey")
             if key and isinstance(key, str) and key.startswith(str(uid)):
@@ -873,6 +951,97 @@ def list_wound_images(wound_id: str, uid: str = Depends(require_auth)):
         return {"ok": True, "images": items_sorted}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/wounds/{wound_id}")
+def delete_wound(wound_id: str, uid: str = Depends(require_auth)):
+    """Delete a wound profile and all its images for the authenticated user."""
+    if not _aws_configured():
+        try:
+            db = LocalSession()
+            # Delete all images belonging to this wound
+            db.query(LocalWoundImage).filter_by(user_id=uid, wound_id=wound_id).delete()
+            # Delete the wound record itself
+            db.query(LocalWound).filter_by(user_id=uid, wound_id=wound_id).delete()
+            db.commit()
+            db.close()
+            return {"ok": True}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    # ── AWS path ──────────────────────────────────────────────────────────
+    try:
+        table = dynamodb.Table(DYNAMODB_TABLE)
+        from boto3.dynamodb.conditions import Attr
+        resp = table.scan(FilterExpression=Attr("userId").eq(uid) & Attr("woundId").eq(wound_id))
+        items = resp.get("Items", [])
+        while resp.get("LastEvaluatedKey"):
+            resp = table.scan(FilterExpression=Attr("userId").eq(uid) & Attr("woundId").eq(wound_id), ExclusiveStartKey=resp.get("LastEvaluatedKey"))
+            items.extend(resp.get("Items", []))
+        with table.batch_writer() as batch:
+            for item in items:
+                batch.delete_item(Key={"pk": item["pk"], "sk": item["sk"]})
+        return {"ok": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/charts/metrics/{wound_id}")
+def get_chart_metrics(wound_id: str, uid: str = Depends(require_auth)):
+    """Return time-series metrics for the progress chart."""
+    if not _aws_configured():
+        try:
+            db = LocalSession()
+            images = (
+                db.query(LocalWoundImage)
+                .filter_by(user_id=uid, wound_id=wound_id)
+                .order_by(LocalWoundImage.timestamp)
+                .all()
+            )
+            db.close()
+
+            dates, area_cm2, length_cm, width_cm, infection_risk, redness_level = [], [], [], [], [], []
+
+            for img in images:
+                try:
+                    a = json.loads(img.analysis or "{}")
+                except Exception:
+                    a = {}
+
+                measurements = a.get("measurements") or {}
+                ha = a.get("healing_assessment") or {}
+                ca = a.get("color_analysis") or {}
+
+                ir_obj = ha.get("infection_risk") or {}
+                ir_score = float(ir_obj.get("score") or 0)
+                ir_level = 1 if ir_score < 34 else (2 if ir_score < 67 else 3)
+
+                redness_ratio = float(ca.get("redness_ratio") or 0)
+                r_level = 1 if redness_ratio < 0.2 else (2 if redness_ratio < 0.4 else 3)
+
+                dates.append(img.timestamp)
+                area_cm2.append(float(measurements.get("area_cm2") or 0))
+                length_cm.append(float(measurements.get("length_cm") or 0))
+                width_cm.append(float(measurements.get("width_cm") or 0))
+                infection_risk.append(ir_level)
+                redness_level.append(r_level)
+
+            return {
+                "ok": True,
+                "data": {
+                    "dates": dates,
+                    "area_cm2": area_cm2,
+                    "length_cm": length_cm,
+                    "width_cm": width_cm,
+                    "infection_risk": infection_risk,
+                    "redness_level": redness_level,
+                    "record_count": len(images),
+                },
+            }
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    return {"ok": False, "error": "AWS mode not supported for chart metrics yet"}
+
 
 @app.post("/predict")
 async def predict(
@@ -925,12 +1094,13 @@ async def predict(
                 # Create temp output directory for visual
                 temp_output_dir = tempfile.mkdtemp()
                 
-                # Run comprehensive wound analysis (generates visual output)
-                analysis_result = analyze_wound_image(
-                    tmp_path,
-                    pixels_per_cm=150.0,
-                    save_visual=False,  # We'll create our own visual with Roboflow bbox
-                    output_dir=temp_output_dir
+                # Run comprehensive wound analysis in a thread pool (non-blocking)
+                import asyncio
+                from functools import partial
+                loop = asyncio.get_event_loop()
+                analysis_result = await loop.run_in_executor(
+                    None,
+                    partial(analyze_wound_image, tmp_path, pixels_per_cm=150.0, save_visual=False, output_dir=temp_output_dir, use_ai_feedback=True)
                 )
                 
                 # Create annotated image with Roboflow bounding box

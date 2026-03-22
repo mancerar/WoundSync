@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Predict API</title>
+    <style>
+        body { font-family: Arial; padding: 20px; max-width: 800px; margin: 0 auto; }
+        button { padding: 10px 20px; margin: 10px 5px; font-size: 16px; }
+        .result { margin-top: 20px; padding: 15px; background: #f0f0f0; border-radius: 5px; }
+        .error { background: #ffebee; color: #c62828; }
+        .success { background: #e8f5e9; color: #2e7d32; }
+        img { max-width: 400px; margin: 10px 0; }
+    </style>
+</head>
+<body>
+    <h1>Test /predict Endpoint</h1>
+    <p>Backend: <strong id="backend-url">http://127.0.0.1:8000</strong></p>
+    
+    <div>
+        <input type="file" id="imageInput" accept="image/*">
+        <button onclick="testPredict()">Analyze (no auth)</button>
+    </div>
+    
+    <div id="preview"></div>
+    <div id="result" class="result"></div>
+
+    <script>
+        const backendUrl = 'http://127.0.0.1:8000';
+
+        document.getElementById('imageInput').addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(event) {
+                    document.getElementById('preview').innerHTML = 
+                        '<h3>Preview:</h3><img src="' + event.target.result + '">';
+                };
+                reader.readAsDataURL(file);
+            }
+        });
+
+        async function testPredict() {
+            const resultDiv = document.getElementById('result');
+            const fileInput = document.getElementById('imageInput');
+            
+            if (!fileInput.files[0]) {
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = 'Please select an image first';
+                return;
+            }
+
+            resultDiv.className = 'result';
+            resultDiv.innerHTML = 'Analyzing...';
+
+            try {
+                const formData = new FormData();
+                formData.append('file', fileInput.files[0]);
+
+                console.log('Sending request to:', backendUrl + '/predict');
+                
+                const response = await fetch(backendUrl + '/predict', {
+                    method: 'POST',
+                    body: formData,
+                    // NO Authorization header = anonymous/no sign-in mode
+                });
+
+                console.log('Response status:', response.status);
+                console.log('Response headers:', [...response.headers.entries()]);
+
+                const data = await response.json();
+                console.log('Response data:', data);
+
+                if (response.ok) {
+                    resultDiv.className = 'result success';
+                    resultDiv.innerHTML = '<h3>✓ Success</h3><pre>' + 
+                        JSON.stringify(data, null, 2) + '</pre>';
+                } else {
+                    resultDiv.className = 'result error';
+                    resultDiv.innerHTML = '<h3>✗ Error (' + response.status + ')</h3><pre>' + 
+                        JSON.stringify(data, null, 2) + '</pre>';
+                }
+            } catch (error) {
+                console.error('Fetch error:', error);
+                resultDiv.className = 'result error';
+                resultDiv.innerHTML = '<h3>✗ Network Error</h3><p>' + error.message + '</p>' +
+                    '<p><strong>Possible causes:</strong></p>' +
+                    '<ul>' +
+                    '<li>Backend not running on port 8000</li>' +
+                    '<li>CORS not configured (check browser console)</li>' +
+                    '<li>Firewall blocking the connection</li>' +
+                    '</ul>';
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,6 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { getAuthToken } from "@/lib/auth";
+
+const BACKEND_URL =
+  process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
 interface ChartData {
   dates: string[];
@@ -25,8 +29,11 @@ export function ProgressChart({ profileId }: { profileId: string }) {
   async function loadChartData() {
     try {
       setLoading(true);
+      const token = await getAuthToken();
+      const headers: HeadersInit = token ? { Authorization: `Bearer ${token}` } : {};
       const response = await fetch(
-        `http://127.0.0.1:8001/api/charts/metrics/${encodeURIComponent(profileId)}`
+        `${BACKEND_URL}/api/charts/metrics/${encodeURIComponent(profileId)}`,
+        { headers }
       );
       const result = await response.json();
       if (result?.ok) {
