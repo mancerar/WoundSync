@@ -3,6 +3,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { setUser } from "@/lib/auth";
 import { useAuth } from "@/app/providers/AuthProvider";
+import { auth } from "@/firebase/firebase";
 import Link from "next/link";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -21,29 +22,44 @@ export default function Signup() {
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setMessage(null);
+
     if (!username || !email || pw.length < 8) {
-      setMessage({ type: "error", text: "Please enter username, email, and a password with at least 8 characters." });
+      setMessage({
+        type: "error",
+        text: "Please enter username, email, and a password with at least 8 characters.",
+      });
       return;
     }
-    
+
     if (!authEnabled) {
       setUser({ email, username });
-      setMessage({ type: "success", text: "Account created successfully. Welcome to WoundSync!" });
+      setMessage({
+        type: "success",
+        text: "Account created successfully. Welcome to WoundSync!",
+      });
       router.replace("/dashboard");
       return;
     }
 
     setIsSubmitting(true);
+
     signUp(email, pw)
-      .then(() => {
+      .then(async () => {
+        if (authEnabled && auth?.currentUser) {
+          await auth.currentUser.getIdToken(true);
+        }
+
         setUser({ email, username });
-        setMessage({ type: "success", text: "Account created successfully. Welcome to WoundSync!" });
+        setMessage({
+          type: "success",
+          text: "Account created successfully. Welcome to WoundSync!",
+        });
         router.replace("/dashboard");
       })
       .catch((err) => {
         const errorCode = err?.code;
         let errorMessage = "Sign up failed";
-        
+
         if (errorCode === "auth/email-already-in-use") {
           errorMessage = "This email is already registered. Redirecting you to login...";
           setMessage({ type: "info", text: errorMessage });
@@ -56,7 +72,7 @@ export default function Signup() {
         } else if (err?.message) {
           errorMessage = err.message;
         }
-        
+
         setMessage({ type: "error", text: errorMessage });
       })
       .finally(() => {
@@ -89,7 +105,6 @@ export default function Signup() {
         </div>
       ) : null}
 
-      {/* Form */}
       <form onSubmit={onSubmit} className="mt-6 space-y-4">
         <div className="relative">
           <UserIcon className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
@@ -122,30 +137,33 @@ export default function Signup() {
           <Input
             className="h-12 rounded-xl pl-10 pr-11 text-base"
             type={showPw ? "text" : "password"}
-            placeholder="Password (min 8 chars)"
+            placeholder="Password"
             value={pw}
             onChange={(e) => setPw(e.target.value)}
           />
           <button
             type="button"
-            onClick={() => setShowPw((v) => !v)}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
             aria-label={showPw ? "Hide password" : "Show password"}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+            onClick={() => setShowPw((s) => !s)}
           >
             {showPw ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
           </button>
         </div>
 
-        <Button type="submit" className="h-12 w-full rounded-xl text-base font-semibold" disabled={isSubmitting}>
+        <Button
+          type="submit"
+          className="w-full h-12 rounded-xl text-base font-medium"
+          disabled={isSubmitting}
+        >
           {isSubmitting ? "Creating account..." : "Create account"}
         </Button>
       </form>
 
-      {/* Auth link */}
-      <p className="mt-4 text-slate-600">
+      <p className="mt-6 text-sm text-slate-600">
         Already have an account?{" "}
-        <Link href="/" className="font-medium text-blue-600">
-          Log in →
+        <Link href="/" className="text-blue-600 hover:underline font-medium">
+          Log in
         </Link>
       </p>
     </div>

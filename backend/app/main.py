@@ -979,7 +979,9 @@ def delete_wound(wound_id: str, uid: str = Depends(require_auth)):
             items.extend(resp.get("Items", []))
         with table.batch_writer() as batch:
             for item in items:
-                batch.delete_item(Key={"pk": item["pk"], "sk": item["sk"]})
+                sk = item.get("sk")
+                if sk:
+                    batch.delete_item(Key={"userId": uid, "sk": sk})
         return {"ok": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

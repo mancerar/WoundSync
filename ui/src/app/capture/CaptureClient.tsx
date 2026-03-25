@@ -116,6 +116,14 @@ type PredictResponse = {
 const BACKEND_URL =
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
 
+function getDisplayWoundName(rawWoundId: string | null): string {
+  if (!rawWoundId) return "a new wound";
+
+  const decoded = decodeURIComponent(rawWoundId);
+  const cleaned = decoded.replace(/-[a-f0-9]{8}$/i, "");
+
+  return cleaned || decoded;
+}
 
 export default function CapturePage() {
   const searchParams = useSearchParams();
@@ -204,7 +212,6 @@ export default function CapturePage() {
     }
   };
 
-  
   const onAnalyzeOnly = async () => {
     if (!file) return;
     setLoading(true);
@@ -259,7 +266,7 @@ export default function CapturePage() {
       <Link href="/dashboard" style={{ display: "inline-block", color: "#2563eb", textDecoration: "none", fontWeight: 600, marginBottom: 12 }}>← Back to Dashboard</Link>
       <h2 style={{ marginBottom: 6 }}>Add photo</h2>
       <p style={{ color: "#666", marginBottom: 14 }}>
-        Adding to <strong>{woundId ? decodeURIComponent(woundId) : "a new wound"}</strong>. We'll analyze and save to this profile.
+        Adding to <strong>{getDisplayWoundName(woundId)}</strong>. We'll analyze and save to this profile.
       </p>
 
       {/* Wound name input — only shown when arriving directly (no woundId in URL) */}
