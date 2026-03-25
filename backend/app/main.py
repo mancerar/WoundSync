@@ -30,8 +30,13 @@ from decimal import Decimal
 logger = logging.getLogger("woundsync-backend")
 logging.basicConfig(level=logging.INFO)
 
-from app.wound_analyzer import analyze_wound_image
-print("DEBUG analyze_wound_image =", analyze_wound_image)
+# Import wound analyzer for comprehensive analysis
+try:
+    from .wound_analyzer import analyze_wound_image
+    logger.info("✓ Comprehensive wound analyzer loaded successfully")
+except ImportError as e:
+    logger.warning(f"✗ Wound analyzer not available: {e}")
+    analyze_wound_image = None
 
 # Import database and models
 from .database import Base, db_engine, Session as LocalSession, LocalWound, LocalWoundImage
@@ -39,9 +44,7 @@ from .models import WoundProfile, WoundRecord
 from .routes import router as profile_router
 from .charts import router as charts_router
 
-from fastapi.middleware.cors import CORSMiddleware
-
-# Create database tables
+# Create database tables (creates local_wounds + local_wound_images too)
 Base.metadata.create_all(bind=db_engine)
 logger.info("✓ Database tables created")
 
@@ -1163,21 +1166,9 @@ async def predict(
                 color_analysis = analysis_result.get("color_analysis", {})
                 healing_assessment = analysis_result.get("healing_assessment", {})
                 
-                if roboflow_bbox:
-                    heuristic_assessment = compute_wound_assessment(
-                        pil_img,
-                        roboflow_bbox,
-                        None,
-                        conf=conf
-                    )
-                else:
-                    heuristic_assessment = compute_wound_assessment(
-                        pil_img,
-                        (0, 0, pil_img.width, pil_img.height),
-                        None,
-                        conf=conf
-                    )
-
+                # Also get the heuristic assessment for additional context
+                bbox = (0, 0, pil_img.width, pil_img.height)  # Default bbox
+                heuristic_assessment = compute_wound_assessment(pil_img, bbox, None, conf=conf)
                 
                 # Combine comprehensive analysis with assessment
                 return JSONResponse(
