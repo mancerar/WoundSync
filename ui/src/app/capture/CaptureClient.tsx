@@ -47,6 +47,12 @@ type PredictResponse = {
     healing_stage?: string;
     healing_progress?: string;
     severity?: string;
+    /** e.g. AI-powered (gemini-2.5-flash-lite) */
+    assessment_method?: string;
+    /** Step 1: free-text / vision narrative from the model (Gemini: image-grounded). */
+    ai_reasoning?: string;
+    /** Step 2: raw JSON string from the model before parsing. */
+    ai_raw_json?: string;
 
     healing_indicators?: string[];
     concerns?: string[];
@@ -123,6 +129,70 @@ function getDisplayWoundName(rawWoundId: string | null): string {
   const cleaned = decoded.replace(/-[a-f0-9]{8}$/i, "");
 
   return cleaned || decoded;
+}
+
+function AiModelRawOutputSection({
+  healing,
+}: {
+  healing: NonNullable<PredictResponse["healing_assessment"]>;
+}) {
+  const step1 = healing.ai_reasoning?.trim();
+  const step2 = healing.ai_raw_json?.trim();
+  if (!step1 && !step2) return null;
+
+  const method = healing.assessment_method ?? "";
+  const isGemini = method.toLowerCase().includes("gemini");
+  const label = isGemini ? "Gemini" : "AI model";
+  const preStyle: React.CSSProperties = {
+    margin: "8px 0 0 0",
+    padding: 10,
+    fontSize: 12,
+    lineHeight: 1.45,
+    whiteSpace: "pre-wrap",
+    wordBreak: "break-word",
+    background: "#1e1e1e",
+    color: "#e4e4e7",
+    borderRadius: 8,
+    maxHeight: 320,
+    overflow: "auto",
+    fontFamily:
+      'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+  };
+
+  return (
+    <div
+      style={{
+        marginTop: 16,
+        padding: 12,
+        background: "#fafafa",
+        borderRadius: 10,
+        border: "1px solid #e4e4e7",
+      }}
+    >
+      <div style={{ fontWeight: 800, fontSize: 15 }}>{label} raw output</div>
+      <div style={{ fontSize: 12, color: "#71717a", marginTop: 4 }}>
+        {method
+          ? `Method: ${method}`
+          : "Unstructured model text and JSON as returned by the API."}
+      </div>
+      {step1 ? (
+        <details style={{ marginTop: 10 }} open>
+          <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: 13 }}>
+            Step 1 — image / clinical analysis (raw text)
+          </summary>
+          <pre style={preStyle}>{step1}</pre>
+        </details>
+      ) : null}
+      {step2 ? (
+        <details style={{ marginTop: 10 }}>
+          <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: 13 }}>
+            Step 2 — structured JSON (raw string)
+          </summary>
+          <pre style={preStyle}>{step2}</pre>
+        </details>
+      ) : null}
+    </div>
+  );
 }
 
 export default function CapturePage() {
@@ -811,6 +881,8 @@ export default function CapturePage() {
                   <div style={{ marginTop: 4 }}>{result.overall_assessment}</div>
                 </div>
               )}
+
+              {healing ? <AiModelRawOutputSection healing={healing} /> : null}
 
               {/* Calibration Info */}
               {result.calibration && (

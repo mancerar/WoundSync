@@ -19,6 +19,9 @@ type ImageRecord = {  imageId: string;
       healing_stage?: string;
       healing_progress?: string;
       severity?: string;
+      assessment_method?: string;
+      ai_reasoning?: string;
+      ai_raw_json?: string;
       healing_indicators?: string[];
       concerns?: string[];
       infection_risk?: { level?: string };
@@ -217,6 +220,82 @@ function AnalysisCard({ record, index }: { record: ImageRecord; index: number })
           {rec.follow_up && (
             <div style={{ marginTop: 12, fontSize: 13, color: "#475569" }}>
               <strong>Follow-up:</strong> {rec.follow_up}
+            </div>
+          )}
+
+          {(ha.ai_reasoning?.trim() || ha.ai_raw_json?.trim()) && (
+            <div
+              style={{
+                marginTop: 16,
+                padding: 12,
+                background: "#fafafa",
+                borderRadius: 10,
+                border: "1px solid #e4e4e7",
+              }}
+            >
+              <div style={{ fontWeight: 800, fontSize: 14, color: "#0f172a" }}>
+                {(ha.assessment_method ?? "").toLowerCase().includes("gemini")
+                  ? "Gemini"
+                  : "AI model"}{" "}
+                raw output
+              </div>
+              {ha.assessment_method ? (
+                <div style={{ fontSize: 12, color: "#64748b", marginTop: 4 }}>
+                  Method: {ha.assessment_method}
+                </div>
+              ) : null}
+              {ha.ai_reasoning?.trim() ? (
+                <details style={{ marginTop: 10 }}>
+                  <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: 13, color: "#334155" }}>
+                    Step 1 — image / clinical analysis (raw text)
+                  </summary>
+                  <pre
+                    style={{
+                      margin: "8px 0 0 0",
+                      padding: 10,
+                      fontSize: 11,
+                      lineHeight: 1.45,
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                      background: "#1e1e1e",
+                      color: "#e4e4e7",
+                      borderRadius: 8,
+                      maxHeight: 280,
+                      overflow: "auto",
+                      fontFamily:
+                        'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+                    }}
+                  >
+                    {ha.ai_reasoning.trim()}
+                  </pre>
+                </details>
+              ) : null}
+              {ha.ai_raw_json?.trim() ? (
+                <details style={{ marginTop: 10 }}>
+                  <summary style={{ cursor: "pointer", fontWeight: 600, fontSize: 13, color: "#334155" }}>
+                    Step 2 — structured JSON (raw string)
+                  </summary>
+                  <pre
+                    style={{
+                      margin: "8px 0 0 0",
+                      padding: 10,
+                      fontSize: 11,
+                      lineHeight: 1.45,
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-word",
+                      background: "#1e1e1e",
+                      color: "#e4e4e7",
+                      borderRadius: 8,
+                      maxHeight: 280,
+                      overflow: "auto",
+                      fontFamily:
+                        'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+                    }}
+                  >
+                    {ha.ai_raw_json.trim()}
+                  </pre>
+                </details>
+              ) : null}
             </div>
           )}
         </div>

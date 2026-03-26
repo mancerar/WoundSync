@@ -1,8 +1,8 @@
 """
 AI-powered clinical feedback module for wound analysis.
 
-Primary provider:
-- Qwen2.5-VL-72B-Instruct via OpenAI-compatible API endpoint
+Primary provider (when configured):
+- Google Gemini API (multimodal), e.g. gemini-2.5-flash-lite
 
 Fallback provider:
 - Local Ollama models
@@ -10,7 +10,6 @@ Fallback provider:
 Falls back to rule-based heuristics if AI is unavailable.
 """
 
-import base64
 import importlib
 import json
 import mimetypes
@@ -19,8 +18,6 @@ import re
 from pathlib import Path
 from typing import Dict, List, Optional
 import warnings
-
-import requests
 
 # Medical disclaimer constant
 MEDICAL_DISCLAIMER = """
@@ -106,8 +103,8 @@ def select_best_medical_model() -> Optional[str]:
 
 
 class AIFeedbackGenerator:
-    """Generate clinical feedback using Qwen-VL or Ollama with safety overrides."""
-    
+    """Generate clinical feedback using Gemini or Ollama with safety overrides."""
+
     def __init__(self, use_ai: bool = True, model_name: Optional[str] = None):
         """
         Initialize AI feedback generator.
@@ -117,23 +114,51 @@ class AIFeedbackGenerator:
             model_name: Specific model to use (auto-selects if None)
         """
         self.provider = "none"
-        self.qwen_api_key = os.getenv("QWEN_VL_API_KEY", "").strip()
-        self.qwen_base_url = os.getenv("QWEN_VL_BASE_URL", "https://openrouter.ai/api/v1").strip().rstrip("/")
-        self.qwen_site_url = os.getenv("QWEN_VL_SITE_URL", "").strip()
-        self.qwen_site_name = os.getenv("QWEN_VL_SITE_NAME", "WoundSync").strip()
+        self._gemini_client = None
+        self._genai_types = None
 
-        qwen_model_from_env = os.getenv("QWEN_VL_MODEL", "").strip()
-        default_qwen_model = qwen_model_from_env or "Qwen2.5-VL-72B-Instruct"
+        try:
+            self._step2_max_analysis_chars = int(
+                os.getenv("AI_FEEDBACK_STEP2_MAX_ANALYSIS_CHARS", "14000").strip() or "14000"
+            )
+        except ValueError:
+            self._step2_max_analysis_chars = 14000
+
+        self.gemini_api_key = (
+            os.getenv("GEMINI_API_KEY", "").strip() or os.getenv("GOOGLE_API_KEY", "").strip()
+        )
+        gemini_model_from_env = os.getenv("GEMINI_MODEL", "").strip()
+        default_gemini_model = gemini_model_from_env or "gemini-2.5-flash-lite"
+        try:
+            self._gemini_read_timeout = float(os.getenv("GEMINI_READ_TIMEOUT", "180").strip() or "180")
+        except ValueError:
+            self._gemini_read_timeout = 180.0
+
+        _g2 = os.getenv("GEMINI_STEP2_JSON_OBJECT", "auto").strip().lower()
+        if _g2 in ("0", "false", "no", "off"):
+            self.gemini_step2_json_object = "off"
+        elif _g2 in ("1", "true", "yes", "on"):
+            self.gemini_step2_json_object = "on"
+        else:
+            self.gemini_step2_json_object = "auto"
 
         self.use_ai = bool(use_ai)
         self.model_name = model_name
 
-        # Provider priority: Qwen-VL API first, then Ollama, then rule-based fallback.
-        if self.use_ai and self.qwen_api_key:
-            self.provider = "qwen_vl_api"
+        if self.use_ai and self.gemini_api_key:
+            from google import genai
+            from google.genai import types as genai_types
+
+            timeout_ms = max(1000, int(self._gemini_read_timeout * 1000))
+            self._gemini_client = genai.Client(
+                api_key=self.gemini_api_key,
+                http_options=genai_types.HttpOptions(timeout=timeout_ms),
+            )
+            self._genai_types = genai_types
+            self.provider = "gemini_api"
             if not self.model_name:
-                self.model_name = default_qwen_model
-            print(f"[AI Feedback] Using Qwen-VL API model: {self.model_name}")
+                self.model_name = default_gemini_model
+            print(f"[AI Feedback] Using Google Gemini model: {self.model_name}")
             return
 
         if self.use_ai and check_ollama_available():
@@ -194,8 +219,8 @@ class AIFeedbackGenerator:
         }
     
     def _get_ai_assessment(self, wound_data: Dict) -> Dict:
-        if self.provider == "qwen_vl_api":
-            return self._get_qwen_vl_assessment(wound_data)
+        if self.provider == "gemini_api":
+            return self._get_gemini_assessment(wound_data)
         return self._get_ollama_assessment(wound_data)
 
     def _get_ollama_assessment(self, wound_data: Dict) -> Dict:
@@ -239,52 +264,107 @@ class AIFeedbackGenerator:
         )
 
         result = self._parse_ai_response(ai_text, wound_data)
-        result['ai_reasoning'] = clinical_analysis
-        # Post-process: correct obvious AI errors using raw color data
+        result["ai_reasoning"] = clinical_analysis
+        result["ai_raw_json"] = (ai_text or "").strip()
         result = self._post_process_result(result, wound_data)
         return result
 
-    def _get_qwen_vl_assessment(self, wound_data: Dict) -> Dict:
-        """Get image-grounded assessment using Qwen2.5-VL via OpenAI-compatible API."""
-        image_path = wound_data.get('image_path')
+    def _get_gemini_assessment(self, wound_data: Dict) -> Dict:
+        """Image-grounded assessment via Google Gemini API (multimodal)."""
+        if not self._gemini_client or not self._genai_types:
+            raise RuntimeError("Gemini client not initialized")
+
+        image_path = wound_data.get("image_path")
         if not image_path:
-            raise ValueError("Qwen-VL requires image_path in wound_data")
+            raise ValueError("Gemini requires image_path in wound_data")
 
-        image_data_url = self._encode_image_to_data_url(image_path)
+        p = Path(image_path)
+        if not p.exists() or not p.is_file():
+            raise FileNotFoundError(f"Image not found for Gemini analysis: {image_path}")
 
-        # Step 1: vision-grounded clinical reasoning
+        mime_type, _ = mimetypes.guess_type(str(p))
+        mime = mime_type or "image/jpeg"
+        image_bytes = p.read_bytes()
+        image_part = self._genai_types.Part.from_bytes(data=image_bytes, mime_type=mime)
+
         analysis_prompt = self._build_vision_analysis_prompt(wound_data)
-        print("[AI Feedback] Qwen Step 1: image-grounded wound analysis...")
-        clinical_analysis = self._qwen_chat(
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": analysis_prompt},
-                        {"type": "image_url", "image_url": {"url": image_data_url}},
-                    ],
-                }
-            ],
-            max_tokens=1000,
+        print("[AI Feedback] Gemini Step 1: image-grounded wound analysis...")
+        clinical_analysis = self._gemini_generate(
+            contents=[image_part, analysis_prompt],
+            max_output_tokens=1000,
             response_json=False,
         )
 
-        # Step 2: convert to strict JSON
-        print("[AI Feedback] Qwen Step 2: structured JSON output...")
-        json_prompt = self._build_json_from_analysis_prompt(clinical_analysis, wound_data)
-        ai_text = self._qwen_chat(
-            messages=[{"role": "user", "content": json_prompt}],
-            max_tokens=1200,
-            response_json=True,
-        )
+        print("[AI Feedback] Gemini Step 2: structured JSON output...")
+        clipped = self._truncate_step2_clinical_text(clinical_analysis)
+        json_prompt = self._build_json_from_analysis_prompt(clipped, wound_data)
+        ai_text = self._gemini_chat_step2(json_prompt)
 
         result = self._parse_ai_response(ai_text, wound_data)
-        result['ai_reasoning'] = clinical_analysis
+        result["ai_reasoning"] = clinical_analysis
+        result["ai_raw_json"] = (ai_text or "").strip()
         result = self._post_process_result(result, wound_data)
         return result
 
+    def _gemini_response_text(self, response) -> str:
+        text = response.text
+        if text is None or not str(text).strip():
+            pf = getattr(response, "prompt_feedback", None)
+            raise RuntimeError(f"Gemini returned empty content. prompt_feedback={pf!r}")
+        return str(text).strip()
+
+    def _gemini_generate(
+        self,
+        contents: List,
+        max_output_tokens: int = 1000,
+        response_json: bool = False,
+    ) -> str:
+        if not self._gemini_client:
+            raise RuntimeError("Gemini client not initialized")
+
+        config: Dict = {
+            "temperature": 0.2,
+            "top_p": 0.9,
+            "max_output_tokens": max_output_tokens,
+        }
+        if response_json:
+            config["response_mime_type"] = "application/json"
+
+        response = self._gemini_client.models.generate_content(
+            model=self.model_name,
+            contents=contents,
+            config=config,
+        )
+        return self._gemini_response_text(response)
+
+    def _gemini_chat_step2(self, json_prompt: str) -> str:
+        contents: List = [json_prompt]
+        if self.gemini_step2_json_object == "off":
+            return self._gemini_generate(contents, max_output_tokens=1200, response_json=False)
+        if self.gemini_step2_json_object == "on":
+            return self._gemini_generate(contents, max_output_tokens=1200, response_json=True)
+        try:
+            return self._gemini_generate(contents, max_output_tokens=1200, response_json=True)
+        except Exception as e:
+            print(
+                "[AI Feedback] Gemini Step 2: JSON mode failed "
+                f"({e!r}) — retrying without application/json response MIME."
+            )
+            return self._gemini_generate(contents, max_output_tokens=1200, response_json=False)
+
+    def _truncate_step2_clinical_text(self, clinical_analysis: str) -> str:
+        limit = max(4000, self._step2_max_analysis_chars)
+        text = (clinical_analysis or "").strip()
+        if len(text) <= limit:
+            return text
+        return (
+            text[: limit - 120]
+            + "\n\n[... earlier clinical analysis truncated for the JSON conversion step ...]\n\n"
+            + text[-100:]
+        )
+
     def _build_vision_analysis_prompt(self, wound_data: Dict) -> str:
-        """Build a vision-aware clinical prompt for Qwen-VL."""
+        """Build a vision-aware clinical prompt for multimodal models."""
         base_prompt = self._build_analysis_prompt(wound_data)
         return (
             "You are analyzing a real wound photograph. Use the image as primary evidence and "
@@ -292,68 +372,6 @@ class AIFeedbackGenerator:
             "the numeric summary, explain the conflict and prioritize what is visually clear in the image.\n\n"
             + base_prompt
         )
-
-    def _encode_image_to_data_url(self, image_path: str) -> str:
-        """Encode local image file as a data URL for multimodal API calls."""
-        p = Path(image_path)
-        if not p.exists() or not p.is_file():
-            raise FileNotFoundError(f"Image not found for Qwen-VL analysis: {image_path}")
-
-        mime_type, _ = mimetypes.guess_type(str(p))
-        mime = mime_type or "image/jpeg"
-        raw = p.read_bytes()
-        b64 = base64.b64encode(raw).decode("utf-8")
-        return f"data:{mime};base64,{b64}"
-
-    def _qwen_chat(self, messages: List[Dict], max_tokens: int = 1000, response_json: bool = False) -> str:
-        """Call Qwen-VL through an OpenAI-compatible chat/completions endpoint."""
-        if not self.qwen_api_key:
-            raise RuntimeError("Missing QWEN_VL_API_KEY")
-
-        url = f"{self.qwen_base_url}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {self.qwen_api_key}",
-            "Content-Type": "application/json",
-        }
-        if self.qwen_site_url:
-            headers["HTTP-Referer"] = self.qwen_site_url
-        if self.qwen_site_name:
-            headers["X-Title"] = self.qwen_site_name
-
-        payload = {
-            "model": self.model_name,
-            "messages": messages,
-            "temperature": 0.2,
-            "top_p": 0.9,
-            "max_tokens": max_tokens,
-        }
-        if response_json:
-            payload["response_format"] = {"type": "json_object"}
-
-        resp = requests.post(url, headers=headers, json=payload, timeout=120)
-        if resp.status_code != 200:
-            raise RuntimeError(f"Qwen API error {resp.status_code}: {resp.text[:400]}")
-
-        data = resp.json()
-        choices = data.get("choices", [])
-        if not choices:
-            raise RuntimeError("Qwen API returned no choices")
-
-        msg = choices[0].get("message", {})
-        content = msg.get("content", "")
-
-        if isinstance(content, list):
-            text_chunks = []
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    text_chunks.append(part.get("text", ""))
-                elif isinstance(part, str):
-                    text_chunks.append(part)
-            content = "\n".join(c for c in text_chunks if c)
-
-        if not isinstance(content, str) or not content.strip():
-            raise RuntimeError("Qwen API returned empty content")
-        return content
 
     def _build_analysis_prompt(self, wound_data: Dict) -> str:
         """Step 1 prompt: ask the AI to reason through the wound in free text."""
@@ -531,119 +549,7 @@ CRITICAL RULES:
     "follow_up": "<your specific follow-up recommendation>"
   }}
 }}"""
-    
-    def _build_clinical_prompt(self, wound_data: Dict) -> str:
-        """Build a JSON-requesting prompt covering all frontend display fields."""
-        m = wound_data.get('measurements', {})
-        c = wound_data.get('color_analysis', {})
-        cper = c.get('color_percentages', {})
 
-        length = m.get('length_cm', 0)
-        width  = m.get('width_cm', 0)
-        area   = m.get('area_cm2', 0)
-        color_desc  = c.get('color_description', 'unknown')
-        redness_pct = c.get('redness_level', 0) * 100
-        darkness_pct = c.get('darkness_level', 0) * 100
-        yellow = cper.get('yellow', 0)
-        green  = cper.get('green', 0)
-        red_pct   = cper.get('red', 0)
-        pink_pct  = cper.get('pink', 0)
-        brown_pct = cper.get('brown', 0)
-
-        # Flag if measurements look unrealistically large (camera calibration often wrong)
-        measurements_note = ""
-        if area > 20 or length > 10 or width > 8:
-            measurements_note = (
-                "NOTE: The pixel-to-cm calibration may be inaccurate (no physical reference "
-                "scale in image). Treat size measurements as rough estimates only. "
-                "Base severity, closure, and healing time primarily on COLOR analysis below."
-            )
-        elif area > 6 or length > 5:
-            measurements_note = "Note: Wound appears large. Confirm measurements with a physical reference if possible."
-
-        return f"""You are a wound care clinician. Analyze the following wound data and fill in the JSON below.
-
-COLOR ANALYSIS (most reliable — based on pixel analysis):
-- Wound color: {color_desc}
-- Red tissue: {red_pct:.1f}%  (granulation/blood)
-- Pink tissue: {pink_pct:.1f}%  (healthy healing)
-- Yellow/slough: {yellow:.1f}%  (possible infection/necrosis)
-- Green: {green:.1f}%  (bacterial infection indicator)
-- Brown/eschar: {brown_pct:.1f}%  (dried blood/eschar)
-- Redness level: {redness_pct:.1f}%
-- Darkness: {darkness_pct:.1f}%
-
-SIZE MEASUREMENTS (may be inaccurate, use as secondary reference only):
-- Length: {length:.2f} cm, Width: {width:.2f} cm, Area: {area:.2f} cm²
-{measurements_note}
-
-CLINICAL ASSESSMENT RULES:
-- Green tissue > 0% always means HIGH infection risk
-- Yellow/slough > 20% means MODERATE-HIGH infection risk
-- Pink > 30% with low yellow/green = healthy healing signs
-- High darkness (necrotic tissue) = SEVERE staging
-- Do NOT copy the placeholder values — replace ALL placeholders with your actual clinical assessment
-- Every string in arrays must be specific to this wound, not generic text
-
-Fill this JSON with your clinical assessment (replace every placeholder value):
-{{
-  "healing_stage": "<inflammatory|proliferative|remodeling|chronic>",
-  "healing_progress": "<normal|good|delayed|impaired|infected|compromised>",
-  "severity": "<mild|moderate|severe>",
-  "concerns": ["<specific concern based on color data above>"],
-  "healing_indicators": ["<positive signs seen, or empty array if none>"],
-  "overall_assessment": "<2-3 sentence clinical summary specific to this wound's color and appearance>",
-  "infection_risk": {{
-    "level": "<low|moderate|high|critical>",
-    "score": <0-100 integer>,
-    "factors": ["<specific risk factors seen in this wound>"]
-  }},
-  "healing_time_prediction": {{
-    "predicted_days_min": <integer>,
-    "predicted_days_max": <integer>,
-    "confidence": "<low|medium|high>",
-    "notes": "<patient-specific factors affecting healing>"
-  }},
-  "stitches": {{
-    "need_stitches": <true|false>,
-    "recommendation": "<specific closure advice for this wound>",
-    "reasons": ["<reason based on wound characteristics>"]
-  }},
-  "scar_risk": {{
-    "risk": "<low|moderate|high>",
-    "score": <0-100 integer>,
-    "tips": [
-      "<specific scar prevention tip 1>",
-      "<specific scar prevention tip 2>",
-      "<specific scar prevention tip 3>"
-    ]
-  }},
-  "recommendations": {{
-    "immediate_care": [
-      "<immediate action tailored to this wound type>",
-      "<immediate action 2>",
-      "<immediate action 3>"
-    ],
-    "ongoing_care": [
-      "<daily care step specific to this wound>",
-      "<daily care step 2>",
-      "<daily care step 3>"
-    ],
-    "medications": {{
-      "healing_aids": ["<specific product suited to this wound>", "<product 2>"],
-      "pain_management": ["<pain option if needed>"],
-      "cautions": ["<specific caution for this wound type>"]
-    }},
-    "warning_signs": [
-      "<warning sign most relevant to this wound's risk profile>",
-      "<warning sign 2>",
-      "<warning sign 3>",
-      "<warning sign 4>"
-    ],
-    "follow_up": "<specific follow-up recommendation based on severity>"
-  }}
-}}"""
-    
     def _parse_ai_response(self, ai_text: str, wound_data: Dict) -> Dict:
         """Parse AI JSON response into the full structured assessment dict."""
         # Strip markdown fences if present
