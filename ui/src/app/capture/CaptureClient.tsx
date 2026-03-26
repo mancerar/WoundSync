@@ -77,14 +77,14 @@ type PredictResponse = {
 
   // recommendations section in your UI
   recommendations?: {
-    immediate_care?: string[];
-    ongoing_care?: string[];
+    immediate_care?: string[] | string;
+    ongoing_care?: string[] | string;
     medications?: {
-      healing_aids?: string[];
-      pain_management?: string[];
-      cautions?: string[];
+      healing_aids?: string[] | string;
+      pain_management?: string[] | string;
+      cautions?: string[] | string;
     };
-    warning_signs?: string[];
+    warning_signs?: string[] | string;
     follow_up?: string;
   };
 
@@ -152,13 +152,25 @@ export default function CapturePage() {
   const healing = result?.healing_assessment;
   const recs = result?.recommendations;
 
-  const healingIndicators = healing?.healing_indicators ?? [];
-  const concerns = healing?.concerns ?? [];
-  const scarTips = healing?.scar_risk?.tips ?? [];
+  const healingIndicators = Array.isArray(healing?.healing_indicators) 
+    ? healing.healing_indicators 
+    : (healing?.healing_indicators ? [healing.healing_indicators] : []);
+  const concerns = Array.isArray(healing?.concerns)
+    ? healing.concerns
+    : (healing?.concerns ? [healing.concerns] : []);
+  const scarTips = Array.isArray(healing?.scar_risk?.tips)
+    ? healing.scar_risk.tips
+    : (healing?.scar_risk?.tips ? [healing.scar_risk.tips] : []);
 
-  const immediateCare = recs?.immediate_care ?? [];
-  const ongoingCare = recs?.ongoing_care ?? [];
-  const warningSigns = recs?.warning_signs ?? [];
+  const immediateCare = Array.isArray(recs?.immediate_care)
+    ? recs.immediate_care
+    : (recs?.immediate_care ? [recs.immediate_care] : []);
+  const ongoingCare = Array.isArray(recs?.ongoing_care)
+    ? recs.ongoing_care
+    : (recs?.ongoing_care ? [recs.ongoing_care] : []);
+  const warningSigns = Array.isArray(recs?.warning_signs)
+    ? recs.warning_signs
+    : (recs?.warning_signs ? [recs.warning_signs] : []);
 
   const rednessLevel = color?.redness_level ?? 0;
   const perimeter = measurements?.perimeter_cm ?? 0;
@@ -276,6 +288,7 @@ export default function CapturePage() {
             Wound name:
           </label>
           <input
+            suppressHydrationWarning
             type="text"
             placeholder="e.g. Left knee scrape"
             value={woundName}
@@ -396,6 +409,7 @@ export default function CapturePage() {
         </button>
 
         <button
+          suppressHydrationWarning
           onClick={onClear}
           disabled={loading}
           style={{
@@ -507,7 +521,7 @@ export default function CapturePage() {
             <div>
               {/* Wound Detection Status */}
               <div style={{ fontWeight: 900, fontSize: 18, marginBottom: 8 }}>
-                Wound Detected: {result.method || "Analysis Complete"}
+                Wound Detected: {result.method || "Analysis Complete"} (Roboflow + Gemini AI)
               </div>
 
               {typeof result.confidence === "number" && (
@@ -740,35 +754,41 @@ export default function CapturePage() {
                         Medications:
                       </div>
                       <div style={{ paddingLeft: 10, marginTop: 4 }}>
-                        {recs.medications.healing_aids?.map(
-                          (med: string, i: number) => (
-                            <div key={`ha-${i}`} style={{ marginTop: 2 }}>
-                              • {med}
-                            </div>
-                          )
-                        )}
-                        {recs.medications.pain_management?.map(
-                          (med: string, i: number) => (
-                            <div key={`pm-${i}`} style={{ marginTop: 2 }}>
-                              • {med}
-                            </div>
-                          )
-                        )}
-                        {(recs.medications.cautions ?? []).length > 0 && (
+                        {(Array.isArray(recs.medications.healing_aids) 
+                          ? recs.medications.healing_aids 
+                          : recs.medications.healing_aids ? [recs.medications.healing_aids] : []
+                        ).map((med: string, i: number) => (
+                          <div key={`ha-${i}`} style={{ marginTop: 2 }}>
+                            • {med}
+                          </div>
+                        ))}
+                        {(Array.isArray(recs.medications.pain_management)
+                          ? recs.medications.pain_management
+                          : recs.medications.pain_management ? [recs.medications.pain_management] : []
+                        ).map((med: string, i: number) => (
+                          <div key={`pm-${i}`} style={{ marginTop: 2 }}>
+                            • {med}
+                          </div>
+                        ))}
+                        {((Array.isArray(recs.medications.cautions)
+                          ? recs.medications.cautions
+                          : recs.medications.cautions ? [recs.medications.cautions] : []
+                        ) ?? []).length > 0 && (
                           <>
                             <div style={{ marginTop: 6, fontWeight: 700 }}>
                               Cautions:
                             </div>
-                            {(recs.medications.cautions ?? []).map(
-                              (caution: string, i: number) => (
-                                <div
-                                  key={`caut-${i}`}
-                                  style={{ marginTop: 2 }}
-                                >
-                                  • {caution}
-                                </div>
-                              )
-                            )}
+                            {(Array.isArray(recs.medications.cautions)
+                              ? recs.medications.cautions
+                              : recs.medications.cautions ? [recs.medications.cautions] : []
+                            ).map((caution: string, i: number) => (
+                              <div
+                                key={`caut-${i}`}
+                                style={{ marginTop: 2 }}
+                              >
+                                • {caution}
+                              </div>
+                            ))}
                           </>
                         )}
                       </div>
@@ -796,6 +816,7 @@ export default function CapturePage() {
                 </>
               )}
 
+
               {/* Overall Assessment */}
               {result.overall_assessment && (
                 <div
@@ -809,6 +830,22 @@ export default function CapturePage() {
                 >
                   <div style={{ fontWeight: 700 }}>Clinical Summary:</div>
                   <div style={{ marginTop: 4 }}>{result.overall_assessment}</div>
+                </div>
+              )}
+
+              {/* Gemini AI Clinical Feedback */}
+              {result.gemini_feedback && (
+                <div
+                  style={{
+                    marginTop: 14,
+                    padding: 10,
+                    background: "#fffbe7",
+                    borderRadius: 8,
+                    borderLeft: "4px solid #fbbf24",
+                  }}
+                >
+                  <div style={{ fontWeight: 700, color: "#b45309" }}>AI Clinical Feedback (Gemini):</div>
+                  <div style={{ marginTop: 4, color: "#92400e" }}>{result.gemini_feedback}</div>
                 </div>
               )}
 

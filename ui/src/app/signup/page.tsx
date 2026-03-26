@@ -55,6 +55,7 @@ export default function Signup() {
           text: "Account created successfully. Welcome to WoundSync!",
         });
         router.replace("/dashboard");
+        router.refresh();
       })
       .catch((err) => {
         const errorCode = err?.code;

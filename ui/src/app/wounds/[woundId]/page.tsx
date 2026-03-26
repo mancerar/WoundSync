@@ -3,11 +3,14 @@
 import React, { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { getWoundImages, getUserWounds, deleteWound } from "@/lib/wounds";
+import { getWoundImages, getUserWounds, deleteWound, deleteWoundImage } from "@/lib/wounds";
 import { Camera, ChevronDown, ChevronUp, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
-type ImageRecord = {  imageId: string;
+type ImageRecord = {
+  imageId: string;
+  imageKey?: string;
+  sk?: string;
   woundId: string;
   timestamp: string;
   healingScore: number;
@@ -27,16 +30,26 @@ type ImageRecord = {  imageId: string;
       scar_risk?: { risk?: string; tips?: string[] };
     };
     recommendations?: {
-      immediate_care?: string[];
-      ongoing_care?: string[];
-      warning_signs?: string[];
+      immediate_care?: string[] | string;
+      ongoing_care?: string[] | string;
+      warning_signs?: string[] | string;
       follow_up?: string;
     };
     overall_assessment?: string;
   };
 };
 
-function AnalysisCard({ record, index }: { record: ImageRecord; index: number }) {
+function AnalysisCard({
+  record,
+  index,
+  onDelete,
+  deleting,
+}: {
+  record: ImageRecord;
+  index: number;
+  onDelete: (record: ImageRecord) => void;
+  deleting: boolean;
+}) {
   const [expanded, setExpanded] = useState(index === 0);
   const a = record.analysis ?? {};
   const m = a.measurements ?? {};
@@ -57,8 +70,7 @@ function AnalysisCard({ record, index }: { record: ImageRecord; index: number })
       }}
     >
       {/* Summary row — always visible */}
-      <button
-        onClick={() => setExpanded((v) => !v)}
+      <div
         style={{
           width: "100%",
           display: "flex",
@@ -67,7 +79,6 @@ function AnalysisCard({ record, index }: { record: ImageRecord; index: number })
           padding: 16,
           background: "none",
           border: "none",
-          cursor: "pointer",
           textAlign: "left",
         }}
       >
@@ -76,6 +87,7 @@ function AnalysisCard({ record, index }: { record: ImageRecord; index: number })
           <img
             src={record.viewUrl}
             alt="wound"
+            onClick={() => setExpanded((v) => !v)}
             style={{
               width: 96,
               height: 96,
@@ -83,10 +95,12 @@ function AnalysisCard({ record, index }: { record: ImageRecord; index: number })
               objectFit: "cover",
               flexShrink: 0,
               border: "1px solid #e2e8f0",
+              cursor: "pointer",
             }}
           />
         ) : (
           <div
+            onClick={() => setExpanded((v) => !v)}
             style={{
               width: 96,
               height: 96,
@@ -99,6 +113,7 @@ function AnalysisCard({ record, index }: { record: ImageRecord; index: number })
               justifyContent: "center",
               color: "#94a3b8",
               fontSize: 12,
+              cursor: "pointer",
             }}
           >
             No image
@@ -106,7 +121,10 @@ function AnalysisCard({ record, index }: { record: ImageRecord; index: number })
         )}
 
         {/* Key stats */}
-        <div style={{ flex: 1, minWidth: 0 }}>
+        <div 
+          style={{ flex: 1, minWidth: 0, cursor: "pointer" }}
+          onClick={() => setExpanded((v) => !v)}
+        >
           <div style={{ fontWeight: 700, color: "#1e293b", marginBottom: 4 }}>{dateStr}</div>
           <div style={{ display: "flex", flexWrap: "wrap", gap: "6px 18px", fontSize: 13, color: "#475569" }}>
             {m.area_cm2 != null && <span>Area: <strong>{Number(m.area_cm2).toFixed(2)} cm²</strong></span>}
@@ -137,10 +155,51 @@ function AnalysisCard({ record, index }: { record: ImageRecord; index: number })
           )}
         </div>
 
-        <div style={{ color: "#94a3b8", flexShrink: 0 }}>
-          {expanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(record);
+            }}
+            disabled={deleting}
+            title="Delete this photo"
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 6,
+              border: "1px solid #fecaca",
+              color: "#dc2626",
+              background: deleting ? "#f8fafc" : "#fff",
+              borderRadius: 8,
+              padding: "6px 10px",
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: deleting ? "not-allowed" : "pointer",
+              opacity: deleting ? 0.7 : 1,
+            }}
+          >
+            <Trash2 size={14} />
+            {deleting ? "Deleting..." : "Delete"}
+          </button>
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            style={{
+              background: "none",
+              border: "none",
+              cursor: "pointer",
+              padding: 4,
+              display: "flex",
+              alignItems: "center",
+              color: "#64748b",
+            }}
+            aria-label={expanded ? "Collapse details" : "Expand details"}
+          >
+            {expanded ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
+          </button>
         </div>
-      </button>
+      </div>
 
       {/* Expanded full feedback */}
       {expanded && (
@@ -158,12 +217,12 @@ function AnalysisCard({ record, index }: { record: ImageRecord; index: number })
               <Section title="Healing Assessment">
                 {ha.healing_indicators?.length ? (
                   <ul style={listStyle}>
-                    {ha.healing_indicators.map((s, i) => <li key={i} style={{ color: "#16a34a" }}>✓ {s}</li>)}
+                    {(Array.isArray(ha.healing_indicators) ? ha.healing_indicators : [ha.healing_indicators]).map((s, i) => <li key={i} style={{ color: "#16a34a" }}>✓ {s}</li>)}
                   </ul>
                 ) : null}
                 {ha.concerns?.length ? (
                   <ul style={listStyle}>
-                    {ha.concerns.map((s, i) => <li key={i} style={{ color: "#dc2626" }}>⚠ {s}</li>)}
+                    {(Array.isArray(ha.concerns) ? ha.concerns : [ha.concerns]).map((s, i) => <li key={i} style={{ color: "#dc2626" }}>⚠ {s}</li>)}
                   </ul>
                 ) : null}
                 {ha.healing_time_prediction?.predicted_days_min != null && (
@@ -180,36 +239,48 @@ function AnalysisCard({ record, index }: { record: ImageRecord; index: number })
                 )}
                 {ha.scar_risk?.tips?.length ? (
                   <ul style={listStyle}>
-                    {ha.scar_risk.tips.map((t, i) => <li key={i}>{t}</li>)}
+                    {(Array.isArray(ha.scar_risk.tips) ? ha.scar_risk.tips : [ha.scar_risk.tips]).map((t, i) => <li key={i}>{t}</li>)}
                   </ul>
                 ) : null}
               </Section>
             )}
 
             {/* Immediate care */}
-            {rec.immediate_care?.length ? (
+            {rec.immediate_care ? (
               <Section title="Immediate Care">
-                <ul style={listStyle}>
-                  {rec.immediate_care.map((s, i) => <li key={i}>{s}</li>)}
-                </ul>
+                {Array.isArray(rec.immediate_care) ? (
+                  <ul style={listStyle}>
+                    {rec.immediate_care.map((s, i) => <li key={i}>{s}</li>)}
+                  </ul>
+                ) : (
+                  <p style={pStyle}>{rec.immediate_care}</p>
+                )}
               </Section>
             ) : null}
 
             {/* Ongoing care */}
-            {rec.ongoing_care?.length ? (
+            {rec.ongoing_care ? (
               <Section title="Ongoing Care">
-                <ul style={listStyle}>
-                  {rec.ongoing_care.map((s, i) => <li key={i}>{s}</li>)}
-                </ul>
+                {Array.isArray(rec.ongoing_care) ? (
+                  <ul style={listStyle}>
+                    {rec.ongoing_care.map((s, i) => <li key={i}>{s}</li>)}
+                  </ul>
+                ) : (
+                  <p style={pStyle}>{rec.ongoing_care}</p>
+                )}
               </Section>
             ) : null}
 
             {/* Warning signs */}
-            {rec.warning_signs?.length ? (
+            {rec.warning_signs ? (
               <Section title="Warning Signs" accent="#fef2f2" border="#fecaca">
-                <ul style={listStyle}>
-                  {rec.warning_signs.map((s, i) => <li key={i} style={{ color: "#dc2626" }}>{s}</li>)}
-                </ul>
+                {Array.isArray(rec.warning_signs) ? (
+                  <ul style={listStyle}>
+                    {rec.warning_signs.map((s, i) => <li key={i} style={{ color: "#dc2626" }}>{s}</li>)}
+                  </ul>
+                ) : (
+                  <p style={{ ...pStyle, color: "#dc2626" }}>{rec.warning_signs}</p>
+                )}
               </Section>
             ) : null}
           </div>
@@ -249,6 +320,11 @@ export default function WoundHistoryPage() {
   const [loading, setLoading] = useState(true);
   const [deleteState, setDeleteState] = useState<"idle" | "confirm" | "deleting">("idle");
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deletingImageRef, setDeletingImageRef] = useState<string | null>(null);
+
+  function imageRefOf(record: ImageRecord): string {
+    return String(record.imageId || record.imageKey || record.sk || "").trim();
+  }
 
   async function handleDelete() {
     setDeleteState("deleting");
@@ -259,6 +335,27 @@ export default function WoundHistoryPage() {
     } catch (err: any) {
       setDeleteError(err?.message || "Delete failed");
       setDeleteState("confirm"); // stay on confirm so user can retry
+    }
+  }
+
+  async function handleDeleteRecord(record: ImageRecord) {
+    const imageRef = imageRefOf(record);
+    if (!imageRef) {
+      alert("Could not determine image id for deletion.");
+      return;
+    }
+
+    const ok = window.confirm("Delete this uploaded photo? This cannot be undone.");
+    if (!ok) return;
+
+    setDeletingImageRef(imageRef);
+    try {
+      await deleteWoundImage(woundId, imageRef);
+      setRecords((prev) => prev.filter((r) => imageRefOf(r) !== imageRef));
+    } catch (err: any) {
+      alert(err?.message || "Failed to delete photo.");
+    } finally {
+      setDeletingImageRef(null);
     }
   }
 
@@ -371,7 +468,13 @@ export default function WoundHistoryPage() {
       {!loading && records.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           {records.map((rec, i) => (
-            <AnalysisCard key={rec.imageId || rec.timestamp || i} record={rec} index={i} />
+            <AnalysisCard
+              key={rec.imageId || rec.imageKey || rec.sk || rec.timestamp || i}
+              record={rec}
+              index={i}
+              onDelete={handleDeleteRecord}
+              deleting={deletingImageRef === imageRefOf(rec)}
+            />
           ))}
         </div>
       )}

@@ -4,7 +4,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { setUser } from "@/lib/auth";
+import { getUser, setUser } from "@/lib/auth";
 import { useAuth } from "@/app/providers/AuthProvider";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -28,20 +28,31 @@ function LoginContent() {
   const [isResetSending, setIsResetSending] = useState(false);
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { signIn, resetPassword, authEnabled } = useAuth();
+  const { user: authUser, loading: authLoading, signIn, resetPassword, authEnabled } = useAuth();
 
   useEffect(() => {
+    if (!authEnabled || authLoading) return;
+    if (authUser) {
+      router.replace("/dashboard");
+    }
+  }, [authEnabled, authLoading, authUser, router]);
+
+  useEffect(() => {
+    const remembered = getUser();
+    if (remembered?.email && !email) setEmail(remembered.email);
+    if (remembered?.username && !username) setUsername(remembered.username);
+
     const emailFromQuery = searchParams.get("email") || "";
     if (emailFromQuery && !email) {
       setEmail(emailFromQuery);
     }
-  }, [searchParams, email]);
+  }, [searchParams, email, username]);
 
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setMessage(null);
-    if (!email || !username) {
-      setMessage({ type: "error", text: "Please enter both your email and username." });
+    if (!email) {
+      setMessage({ type: "error", text: "Please enter your email." });
       return;
     }
     if (!pw) {
@@ -51,7 +62,7 @@ function LoginContent() {
     
     // If Firebase auth is not enabled, use local fallback and navigate.
     if (!authEnabled) {
-      setUser({ email, username });
+      setUser({ email, ...(username ? { username } : {}) });
       setMessage({ type: "success", text: "Signed in successfully. Redirecting to your dashboard..." });
       router.replace("/dashboard");
       return;
@@ -61,7 +72,7 @@ function LoginContent() {
     
     signIn(email, pw)
       .then(() => {
-        setUser({ email, username });
+        setUser({ email, ...(username ? { username } : {}) });
         setMessage({ type: "success", text: "Welcome back to WoundSync. Redirecting..." });
         router.replace("/dashboard");
       })
@@ -100,33 +111,43 @@ function LoginContent() {
       return;
     }
 
-    if (!authEnabled) {
-      setMessage({ type: "error", text: "Password reset is unavailable while Firebase auth is disabled." });
-      return;
-    }
-
     setIsResetSending(true);
     try {
-      await resetPassword(targetEmail);
-      setMessage({ type: "success", text: "Password reset email sent. Check your inbox (and spam) for the WoundSync reset link." });
-    } catch (err: unknown) {
-      const errorCode = (err as { code?: string })?.code;
-      let errorMessage = "Could not send reset email.";
+      // Use SendGrid via our backend for custom branded emails
+      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
+      const resetUrl = `${window.location.origin}/reset-password`;
+      
+      const response = await fetch(`${backendUrl}/auth/request-password-reset`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: targetEmail,
+          reset_url: resetUrl,
+        }),
+      });
 
-      if (errorCode === "auth/user-not-found") {
-        errorMessage = "No account found with that email. Please sign up first.";
-      } else if (errorCode === "auth/invalid-email") {
-        errorMessage = "Please enter a valid email address.";
-      } else if (errorCode === "auth/operation-not-allowed") {
-        errorMessage = "Email/Password sign-in is not enabled in Firebase Authentication. Enable it, then retry.";
-      } else if (errorCode === "auth/unauthorized-continue-uri") {
-        errorMessage = "Password reset redirect URL is not authorized in Firebase. Add localhost/your app domain under Authentication > Settings > Authorized domains.";
-      } else if (errorCode === "auth/network-request-failed") {
-        errorMessage = "Network error while sending reset email. Check your internet and retry.";
-      } else if (errorCode === "auth/too-many-requests") {
-        errorMessage = "Too many reset attempts. Please wait a bit and try again.";
-      } else if (typeof err === "object" && err && "message" in err && typeof (err as { message?: string }).message === "string") {
-        errorMessage = (err as { message: string }).message;
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.detail || "Failed to send reset email");
+      }
+
+      setMessage({ 
+        type: "success", 
+        text: "Password reset email sent! Check your inbox (and spam folder) for a link from WoundSync." 
+      });
+    } catch (err: unknown) {
+      let errorMessage = "Could not send reset email. Please try again.";
+
+      if (err instanceof Error) {
+        if (err.message.includes("Email service is not configured")) {
+          errorMessage = "Email service is temporarily unavailable. Please try again later.";
+        } else if (err.message.includes("Failed to send email")) {
+          errorMessage = "Failed to send email. Please check your email address and try again.";
+        } else {
+          errorMessage = err.message;
+        }
       }
 
       setMessage({ type: "error", text: errorMessage });
@@ -222,6 +243,7 @@ function LoginContent() {
             onChange={(e) => setPw(e.target.value)}
           />
           <button
+            suppressHydrationWarning
             type="button"
             onClick={() => setShowPw((v) => !v)}
             className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
@@ -240,6 +262,7 @@ function LoginContent() {
         </Button>
 
         <button
+          suppressHydrationWarning
           type="button"
           onClick={onForgotPassword}
           className="text-sm font-medium text-blue-600 hover:underline disabled:cursor-not-allowed disabled:opacity-60"

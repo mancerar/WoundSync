@@ -9,6 +9,8 @@ import { auth } from "@/firebase/firebase";
 
 import {
   onAuthStateChanged,
+  setPersistence,
+  browserSessionPersistence,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   sendPasswordResetEmail,
@@ -54,13 +56,27 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
       return;
     }
 
-    const unsub = onAuthStateChanged(auth!, (u) => {
-      if (!u) setUser(null);
-      else setUser({ uid: u.uid, email: u.email });
-      setLoading(false);
-    });
+    let unsub: (() => void) | undefined;
 
-    return () => unsub();
+    const init = async () => {
+      try {
+        await setPersistence(auth!, browserSessionPersistence);
+      } catch (error) {
+        console.warn("Could not enable Firebase session persistence:", error);
+      }
+
+      unsub = onAuthStateChanged(auth!, (u) => {
+        if (!u) setUser(null);
+        else setUser({ uid: u.uid, email: u.email });
+        setLoading(false);
+      });
+    };
+
+    void init();
+
+    return () => {
+      if (unsub) unsub();
+    };
   }, [authEnabled]);
 
   const value = useMemo<AuthContextType>(() => {

@@ -13,8 +13,9 @@ import {
   getUserWounds,
   getWoundImages,
   createWoundProfile,
+  deleteWoundImage,
 } from "@/lib/wounds";
-import { Plus, Flame, Trophy, Target, ChevronRight, Camera } from "lucide-react";
+import { Plus, Flame, Trophy, Target, ChevronRight, Camera, Trash2 } from "lucide-react";
 
 type AchievementItem = {
   id: string;
@@ -233,6 +234,7 @@ export default function Dashboard() {
 
   const [loading, setLoading] = useState(true);
   const [creatingWound, setCreatingWound] = useState(false);
+  const [deletingImageRef, setDeletingImageRef] = useState<string | null>(null);
   const [showNewWoundForm, setShowNewWoundForm] = useState(false);
   const [newWoundName, setNewWoundName] = useState("");
 
@@ -345,6 +347,29 @@ export default function Dashboard() {
       if (seq === loadSeqRef.current) {
         setLoading(false);
       }
+    }
+  }
+
+  async function handleDeleteImage(item: any) {
+    if (!selectedProfileId) return;
+
+    const imageRef = String(item?.imageId || item?.sk || item?.imageKey || "").trim();
+    if (!imageRef) {
+      alert("Could not determine image id for deletion.");
+      return;
+    }
+
+    const ok = window.confirm("Delete this uploaded photo from this injury? This cannot be undone.");
+    if (!ok) return;
+
+    try {
+      setDeletingImageRef(imageRef);
+      await deleteWoundImage(selectedProfileId, imageRef);
+      await loadDashboardData(selectedProfileId);
+    } catch (err: any) {
+      alert("Could not delete this photo: " + (err?.message ?? String(err)));
+    } finally {
+      setDeletingImageRef(null);
     }
   }
 
@@ -705,26 +730,43 @@ export default function Dashboard() {
                         </div>
                       )}
 
-                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 min-w-0">
-                        <span className="font-medium text-slate-800">
-                          {recAt ? new Date(recAt).toLocaleString() : "—"}
-                        </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-2 justify-between">
+                          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 min-w-0">
+                            <span className="font-medium text-slate-800">
+                              {recAt ? new Date(recAt).toLocaleString() : "—"}
+                            </span>
 
-                        {area !== null && (
-                          <span className="text-slate-600">
-                            Area: {Number(area).toFixed(2)} cm²
-                          </span>
-                        )}
+                            {area !== null && (
+                              <span className="text-slate-600">
+                                Area: {Number(area).toFixed(2)} cm²
+                              </span>
+                            )}
 
-                        {stage && (
-                          <span className="text-slate-600">Stage: {String(stage)}</span>
-                        )}
+                            {stage && (
+                              <span className="text-slate-600">Stage: {String(stage)}</span>
+                            )}
 
-                        {severity && (
-                          <span className="text-slate-600">
-                            Severity: {String(severity)}
-                          </span>
-                        )}
+                            {severity && (
+                              <span className="text-slate-600">
+                                Severity: {String(severity)}
+                              </span>
+                            )}
+                          </div>
+
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            className="text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
+                            onClick={() => void handleDeleteImage(item)}
+                            disabled={deletingImageRef === String(item?.imageId || item?.sk || item?.imageKey || "")}
+                            title="Delete this photo"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                            {deletingImageRef === String(item?.imageId || item?.sk || item?.imageKey || "") ? "Deleting..." : "Delete"}
+                          </Button>
+                        </div>
                       </div>
                     </li>
                   );

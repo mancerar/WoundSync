@@ -38,6 +38,14 @@ except ImportError as e:
     logger.warning(f"✗ Wound analyzer not available: {e}")
     analyze_wound_image = None
 
+# Import email service
+try:
+    from .email_service import email_service
+    logger.info("✓ Email service loaded successfully")
+except ImportError as e:
+    logger.warning(f"✗ Email service not available: {e}")
+    email_service = None
+
 # Import database and models
 from .database import Base, db_engine, Session as LocalSession, LocalWound, LocalWoundImage
 from .models import WoundProfile, WoundRecord
@@ -182,6 +190,9 @@ def roboflow_workflow_infer(image_bytes: bytes) -> Dict[str, Any]:
     
     # For detect.roboflow.com, send the base64 string directly
     r = requests.post(url, data=b64, headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=45)
+    import logging
+    logger = logging.getLogger("woundsync-backend")
+    logger.info(f"Roboflow API response (status {r.status_code}): {r.text}")
     if r.status_code != 200:
         raise RuntimeError(f"Roboflow error {r.status_code}: {r.text}")
     return r.json()
@@ -674,6 +685,90 @@ def test_s3():
 def health():
     return {"ok": True}
 
+
+# Password Reset Endpoint
+class PasswordResetRequest(BaseModel):
+    email: str
+    reset_url: str  # Frontend will provide the base URL
+
+
+@app.post("/auth/request-password-reset")
+async def request_password_reset(request: PasswordResetRequest):
+    """
+    Send a password reset email via SendGrid with Firebase reset link.
+    This is called from the frontend when user clicks "Forgot Password".
+    """
+    logger.info(f"Password reset requested for email: {request.email}")
+    
+    if not email_service or not email_service.enabled:
+        logger.error("Email service not configured")
+        raise HTTPException(
+            status_code=503,
+            detail="Email service is not configured. Please contact support."
+        )
+    
+    email = request.email.strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+    
+    try:
+        # Import Firebase Admin to generate password reset link
+        import firebase_admin
+        from firebase_admin import auth as firebase_auth
+        
+        logger.info(f"Generating Firebase reset link for {email}")
+        
+        # Generate Firebase password reset link
+        # This creates a secure link that Firebase will validate
+        action_code_settings = firebase_auth.ActionCodeSettings(
+            url=request.reset_url,
+            handle_code_in_app=False,
+        )
+        
+        # Generate the reset link
+        reset_link = firebase_auth.generate_password_reset_link(
+            email, 
+            action_code_settings=action_code_settings
+        )
+        
+        logger.info(f"Firebase reset link generated successfully for {email}")
+        logger.info(f"Sending email to {email} via SendGrid")
+        
+        # Send the reset email via SendGrid with the Firebase link
+        success = email_service.send_password_reset_email(
+            to_email=email,
+            reset_link=reset_link
+        )
+        
+        if success:
+            logger.info(f"Password reset email sent successfully to {email}")
+            return {
+                "ok": True,
+                "message": "If an account exists with this email, a password reset link has been sent."
+            }
+        else:
+            logger.error(f"Failed to send password reset email to {email}")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to send email. Please try again later."
+            )
+            
+    except firebase_admin.auth.UserNotFoundError:
+        logger.warning(f"User not found for email: {email}")
+        # For security, don't reveal if user exists or not
+        return {
+            "ok": True,
+            "message": "If an account exists with this email, a password reset link has been sent."
+        }
+    except Exception as e:
+        logger.error(f"Password reset error for {email}: {type(e).__name__}: {e}")
+        # For security, don't reveal specific errors to user
+        return {
+            "ok": True,
+            "message": "If an account exists with this email, a password reset link has been sent."
+        }
+
+
 @app.post("/wounds/{wound_id}/upload-url")
 def generate_upload_url(
     wound_id: str,
@@ -987,6 +1082,79 @@ def delete_wound(wound_id: str, uid: str = Depends(require_auth)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.delete("/wounds/{wound_id}/images/{image_ref:path}")
+def delete_wound_image(wound_id: str, image_ref: str, uid: str = Depends(require_auth)):
+    """Delete a single uploaded image from a wound profile for the authenticated user."""
+    if not image_ref or not image_ref.strip():
+        raise HTTPException(status_code=400, detail="image_ref is required")
+
+    ref = image_ref.strip()
+
+    if not _aws_configured():
+        try:
+            db = LocalSession()
+            row = (
+                db.query(LocalWoundImage)
+                .filter_by(user_id=uid, wound_id=wound_id, image_id=ref)
+                .first()
+            )
+            if not row:
+                db.close()
+                raise HTTPException(status_code=404, detail="Image not found")
+
+            db.delete(row)
+            db.commit()
+            db.close()
+            return {"ok": True}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    try:
+        table = dynamodb.Table(DYNAMODB_TABLE)
+        from boto3.dynamodb.conditions import Attr
+
+        resp = table.scan(FilterExpression=Attr("userId").eq(uid) & Attr("woundId").eq(wound_id))
+        items = resp.get("Items", [])
+        while resp.get("LastEvaluatedKey"):
+            resp = table.scan(
+                FilterExpression=Attr("userId").eq(uid) & Attr("woundId").eq(wound_id),
+                ExclusiveStartKey=resp.get("LastEvaluatedKey")
+            )
+            items.extend(resp.get("Items", []))
+
+        target_item = None
+        for item in items:
+            sk_val = str(item.get("sk") or "")
+            image_key_val = str(item.get("imageKey") or "")
+            image_id_val = str(item.get("imageId") or "")
+            if ref in (sk_val, image_key_val, image_id_val):
+                target_item = item
+                break
+
+        if not target_item:
+            raise HTTPException(status_code=404, detail="Image not found")
+
+        sk = target_item.get("sk")
+        if not sk:
+            raise HTTPException(status_code=500, detail="Invalid image record: missing sk")
+
+        image_key = target_item.get("imageKey")
+        if image_key and isinstance(image_key, str):
+            try:
+                s3.delete_object(Bucket=BUCKET_NAME, Key=image_key)
+            except Exception as s3_err:
+                logger.warning(f"Failed deleting S3 object {image_key}: {s3_err}")
+
+        table.delete_item(Key={"userId": uid, "sk": sk})
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/api/charts/metrics/{wound_id}")
 def get_chart_metrics(wound_id: str, uid: str = Depends(require_auth)):
     """Return time-series metrics for the progress chart."""
@@ -1059,165 +1227,16 @@ async def predict(
         pil_img, infer_bytes = preprocess_image(image_bytes, max_side=MAX_IMAGE_SIDE)
         logger.info(f"🖼️ Preprocessed to {pil_img.size[0]}x{pil_img.size[1]}")
 
-        # Use comprehensive wound analyzer if available
-        if analyze_wound_image is not None:
-            try:
-                logger.info("Running comprehensive wound analysis...")
-                
-                # FIRST: Get Roboflow predictions for bounding box
-                rf_json = roboflow_workflow_infer(infer_bytes)
-                pred_lists = extract_prediction_lists(rf_json)
-                all_preds: List[Dict[str, Any]] = []
-                for lst in pred_lists:
-                    for p in lst:
-                        if isinstance(p, dict) and pred_conf(p) > 0:
-                            all_preds.append(p)
-                
-                # Prefer wound-ish classes
-                wound_preds = [p for p in all_preds if pred_class(p).lower() in ["wound", "abrasion", "cut", "laceration"]]
-                candidates = wound_preds if wound_preds else all_preds
-                
-                # Get best prediction bbox
-                roboflow_bbox = None
-                roboflow_conf = 0.0
-                if candidates:
-                    img_w, img_h = pil_img.size
-                    candidates_sorted = sorted(candidates, key=lambda p: (pred_conf(p), bbox_area_of_pred(p, img_w, img_h)), reverse=True)
-                    best = candidates_sorted[0]
-                    roboflow_conf = pred_conf(best)
-                    roboflow_bbox = parse_bbox(best, img_w, img_h)
-                    logger.info(f"✓ Roboflow detected wound with {roboflow_conf:.1%} confidence")
-                
-                # Save image temporarily for analysis
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
-                    tmp_path = tmp_file.name
-                    pil_img.save(tmp_path, format='JPEG', quality=95)
-                
-                # Create temp output directory for visual
-                temp_output_dir = tempfile.mkdtemp()
-                
-                # Run comprehensive wound analysis in a thread pool (non-blocking)
-                import asyncio
-                from functools import partial
-                loop = asyncio.get_event_loop()
-                analysis_result = await loop.run_in_executor(
-                    None,
-                    partial(analyze_wound_image, tmp_path, pixels_per_cm=150.0, save_visual=False, output_dir=temp_output_dir, use_ai_feedback=True)
-                )
-                
-                # Create annotated image with Roboflow bounding box
-                annotated_image_b64 = None
-                if roboflow_bbox:
-                    try:
-                        import cv2
-                        import numpy as np
-                        # Load original image
-                        img_np = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-                        x1, y1, x2, y2 = roboflow_bbox
-                        
-                        # Draw green bounding box
-                        cv2.rectangle(img_np, (x1, y1), (x2, y2), (0, 255, 0), 3)
-                        
-                        # Add measurements text
-                        measurements = analysis_result.get("measurements", {})
-                        length = measurements.get("length_cm", 0)
-                        width = measurements.get("width_cm", 0)
-                        area = measurements.get("area_cm2", 0)
-                        text = f"LxW: {length:.1f}x{width:.1f} cm  |  Area: {area:.1f} cm^2"
-                        
-                        # Put text below the box
-                        text_y = min(img_np.shape[0] - 10, y2 + 30)
-                        cv2.putText(img_np, text, (x1, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-                        
-                        # Encode to base64
-                        _, buffer = cv2.imencode('.jpg', img_np)
-                        annotated_image_b64 = base64.b64encode(buffer).decode("utf-8")
-                        logger.info(f"✓ Created annotated image with Roboflow bbox")
-                    except Exception as e:
-                        logger.error(f"Failed to create annotated image: {e}")
-                
-                # Clean up temp files
-                try:
-                    os.unlink(tmp_path)
-                    if os.path.exists(temp_output_dir):
-                        # Try to remove directory - may not be empty
-                        try:
-                            os.rmdir(temp_output_dir)
-                        except:
-                            import shutil
-                            shutil.rmtree(temp_output_dir, ignore_errors=True)
-                except Exception as e:
-                    logger.warning(f"Cleanup warning: {e}")
-                
-                # Check if wound was detected
-                if not analysis_result.get("wound_detected", False):
-                    return JSONResponse(
-                        status_code=200,
-                        content={
-                            "ok": True,
-                            "detected": False,
-                            "confidence": analysis_result.get("confidence", 0.0),
-                            "message": "No wound detected. Retake with better light and focus.",
-                            "min_confidence": MIN_CONFIDENCE,
-                            "analysis": analysis_result if debug else None,
-                        },
-                    )
-                
-                conf = analysis_result.get("confidence", 0.0)
-                measurements = analysis_result.get("measurements", {})
-                color_analysis = analysis_result.get("color_analysis", {})
-                healing_assessment = analysis_result.get("healing_assessment", {})
-                
-                # Also get the heuristic assessment for additional context
-                bbox = (0, 0, pil_img.width, pil_img.height)  # Default bbox
-                heuristic_assessment = compute_wound_assessment(pil_img, bbox, None, conf=conf)
-                
-                # Combine comprehensive analysis with assessment
-                return JSONResponse(
-                    status_code=200,
-                    content={
-                        "ok": True,
-                        "detected": True,
-                        "confidence": conf,
-                        "method": analysis_result.get("method", "Computer Vision"),
-                        "annotated_image": annotated_image_b64,  # Base64 encoded annotated image
-                        "measurements": {
-                            "length_cm": measurements.get("length_cm", 0),
-                            "width_cm": measurements.get("width_cm", 0),
-                            "area_cm2": measurements.get("area_cm2", 0),
-                            "perimeter_cm": measurements.get("perimeter_cm", 0),
-                        },
-                        "color_analysis": color_analysis,
-                        "healing_assessment": healing_assessment,
-                        "overall_assessment": analysis_result.get("overall_assessment", ""),
-                        "recommendations": analysis_result.get("recommendations", {}),
-                        "assessment": heuristic_assessment,  # Includes urgency and care tips
-                        "pixels_per_cm": analysis_result.get("pixels_per_cm", 45.0),
-                        "calibration": analysis_result.get("calibration", {}),
-                        "min_confidence": MIN_CONFIDENCE,
-                        "debug": analysis_result if debug else None,
-                    },
-                )
-                
-            except Exception as e:
-                logger.warning(f"Comprehensive analysis failed ({e}), falling back to Roboflow only")
-                # Fall through to original Roboflow workflow below
-        
-        # Original Roboflow workflow logic (fallback or when analyzer not available)
+        # Always use Roboflow for detection and bounding box
         rf_json = roboflow_workflow_infer(infer_bytes)
         pred_lists = extract_prediction_lists(rf_json)
-
         all_preds: List[Dict[str, Any]] = []
         for lst in pred_lists:
             for p in lst:
                 if isinstance(p, dict) and pred_conf(p) > 0:
                     all_preds.append(p)
 
-        # Prefer wound-ish classes if your model uses them; otherwise keep all
-        wound_preds = [
-            p for p in all_preds
-            if pred_class(p).lower() in ["wound", "abrasion", "cut", "laceration"]
-        ]
+        wound_preds = [p for p in all_preds if pred_class(p).lower() in ["wound", "abrasion", "cut", "laceration"]]
         candidates = wound_preds if wound_preds else all_preds
 
         if not candidates:
@@ -1234,65 +1253,90 @@ async def predict(
             )
 
         img_w, img_h = pil_img.size
-
-        def bbox_area_of(p: Dict[str, Any]) -> float:
-            bb = parse_bbox(p, img_w, img_h)
-            if not bb:
-                return 0.0
-            x1, y1, x2, y2 = bb
-            return float((x2 - x1) * (y2 - y1))
-
         candidates_sorted = sorted(
             candidates,
-            key=lambda p: (pred_conf(p), bbox_area_of(p)),
+            key=lambda p: (pred_conf(p), bbox_area_of_pred(p, img_w, img_h)),
             reverse=True,
         )
         best = candidates_sorted[0]
         conf = pred_conf(best)
+        bbox = parse_bbox(best, img_w, img_h)
+        poly = parse_polygon_points(best)
 
-        if conf < MIN_CONFIDENCE:
+        if not bbox or conf < MIN_CONFIDENCE:
             return JSONResponse(
                 status_code=200,
                 content={
                     "ok": True,
                     "detected": False,
                     "confidence": conf,
-                    "message": "Not confident enough. Retake with better light and focus.",
+                    "message": "No wound detected or not confident enough.",
                     "min_confidence": MIN_CONFIDENCE,
                     "debug": rf_json if debug else None,
                 },
             )
 
-        bbox = parse_bbox(best, img_w, img_h)
-        poly = parse_polygon_points(best)
+        # Draw Roboflow bounding box on image
+        annotated_image_b64 = None
+        try:
+            import cv2
+            import numpy as np
+            img_np = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+            x1, y1, x2, y2 = bbox
+            cv2.rectangle(img_np, (x1, y1), (x2, y2), (0, 255, 0), 3)
+            text = f"Confidence: {conf:.1%}"
+            text_y = min(img_np.shape[0] - 10, y2 + 30)
+            cv2.putText(img_np, text, (x1, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+            _, buffer = cv2.imencode('.jpg', img_np)
+            annotated_image_b64 = base64.b64encode(buffer).decode("utf-8")
+        except Exception as e:
+            logger.error(f"Failed to create annotated image: {e}")
 
-        if not bbox:
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "ok": True,
-                    "detected": True,
-                    "confidence": conf,
-                    "message": "Prediction found but bbox missing. Check workflow output format.",
-                    "min_confidence": MIN_CONFIDENCE,
-                    "debug": rf_json if debug else None,
-                },
+        # Perform comprehensive wound analysis with Gemini
+        comprehensive_analysis = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
+                tmp_path = tmp_file.name
+                pil_img.save(tmp_path, format='JPEG', quality=95)
+            
+            # Use analyze_wound_image for complete analysis
+            comprehensive_analysis = analyze_wound_image(
+                image_path=tmp_path,
+                save_visual=False,
+                use_ai_feedback=True
             )
+            os.unlink(tmp_path)
+        except Exception as e:
+            logger.warning(f"Comprehensive wound analysis unavailable: {e}")
+            comprehensive_analysis = None
 
         assessment = compute_wound_assessment(pil_img, bbox, poly, conf=conf)
 
+        # Build response with comprehensive analysis data
+        response_content = {
+            "ok": True,
+            "detected": True,
+            "confidence": conf,
+            "class": pred_class(best),
+            "bbox": {"x1": bbox[0], "y1": bbox[1], "x2": bbox[2], "y2": bbox[3]},
+            "annotated_image": annotated_image_b64,
+            "assessment": assessment,
+            "min_confidence": MIN_CONFIDENCE,
+            "debug": rf_json if debug else None,
+        }
+
+        # Merge comprehensive analysis data into response
+        if comprehensive_analysis and comprehensive_analysis.get("wound_detected"):
+            response_content["measurements"] = comprehensive_analysis.get("measurements", {})
+            response_content["color_analysis"] = comprehensive_analysis.get("color_analysis", {})
+            response_content["healing_assessment"] = comprehensive_analysis.get("healing_assessment", {})
+            response_content["recommendations"] = comprehensive_analysis.get("recommendations", {})
+            response_content["overall_assessment"] = comprehensive_analysis.get("overall_assessment", "")
+            response_content["method"] = comprehensive_analysis.get("method", "Traditional Computer Vision Detection using Roboflow and Gemini Models")
+
         return JSONResponse(
             status_code=200,
-            content={
-                "ok": True,
-                "detected": True,
-                "confidence": conf,
-                "class": pred_class(best),
-                "bbox": {"x1": bbox[0], "y1": bbox[1], "x2": bbox[2], "y2": bbox[3]},
-                "assessment": assessment,
-                "min_confidence": MIN_CONFIDENCE,
-                "debug": rf_json if debug else None,
-            },
+            content=response_content,
         )
 
     except Exception as e:
@@ -1680,15 +1724,16 @@ async def chat(req: ChatRequest):
     wound_summary = _build_wound_summary(req.wound_context)
 
     system_prompt = (
-        "You are WoundSync AI, a first-aid and wound-care assistant built into a medical app. "
-        "Your SOLE purpose is to help users understand and care for their wounds at home. "
-        "IMPORTANT RULES you must follow without exception:\n"
+        "You are WoundSync AI, a helpful AI assistant built into a medical app. "
+        "While your primary focus is wound care and first aid, you can answer any question the user asks. "
+        "IMPORTANT RULES you must follow:\n"
         "1. ALWAYS answer wound care questions such as how to clean a wound, how to bandage it, signs of infection, healing time, and when to see a doctor. This is your primary job — never refuse these.\n"
         "2. Give specific, step-by-step first-aid instructions using plain language.\n"
-        "3. If the user's wound analysis is provided below, reference it directly (e.g. 'Since your wound is classified as a laceration...').\n"
-        "4. You MAY answer general medical, health, or science questions using your knowledge.\n"
-        "5. At the end of serious answers add: 'If symptoms worsen, see a healthcare professional.'\n"
-        "6. NEVER say 'I cannot provide medical advice' for basic first-aid topics — that refusal is harmful in this context.\n\n"
+        "3. If the user's wound analysis is provided below, reference it directly when answering wound-related questions (e.g. 'Since your wound is classified as a laceration...').\n"
+        "4. You MAY answer ANY general questions including medical, health, science, technology, history, math, or any other topic using your knowledge.\n"
+        "5. For wound-related answers, add at the end: 'If symptoms worsen, see a healthcare professional.'\n"
+        "6. NEVER say 'I cannot provide medical advice' for basic first-aid topics — that refusal is harmful in this context.\n"
+        "7. Be friendly, helpful, and conversational. Answer questions naturally and thoroughly.\n\n"
         f"{wound_summary}"
     )
 
@@ -1698,18 +1743,27 @@ async def chat(req: ChatRequest):
             messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": question})
 
-    # ── Try Ollama (AI model) ─────────────────────────────────────────────────
+    # ── Ollama only (AI model) ────────────────────────────────────────────────
     _ensure_ollama_running()
     try:
         import ollama
         model_resp = ollama.list()
         available = [m.model if hasattr(m, 'model') else m.get('name', '')
                      for m in (model_resp.models if hasattr(model_resp, 'models') else model_resp.get('models', []))]
-        # llama3.2 handles chat/system-prompts correctly; meditron is clinical
-        # notes only and echoes the system prompt — use it last resort only
-        PREFERRED = ["llama3.2:3b", "llama3:8b", "llama3.2", "llama3", "mistral", "phi3", "gemma", "meditron:7b", "meditron"]
-        model_name = next((p for p in PREFERRED if any(a.startswith(p.split(":")[0]) for a in available)),
-                          available[0] if available else None)
+        preferred_model = os.getenv("OLLAMA_CHAT_MODEL", "llama3.2:3b").strip()
+
+        def _pick_model(models: List[str], preferred: str) -> Optional[str]:
+            if not models:
+                return None
+            if preferred in models:
+                return preferred
+            preferred_base = preferred.split(":")[0].lower()
+            for m in models:
+                if m.lower().startswith(preferred_base):
+                    return m
+            return models[0]
+
+        model_name = _pick_model(available, preferred_model)
         if not model_name:
             raise RuntimeError("No models installed in Ollama")
         logger.info(f"[Chat] Using Ollama model: {model_name}")
@@ -1737,12 +1791,15 @@ async def chat(req: ChatRequest):
         answer = resp.message.content if hasattr(resp, "message") else resp["message"]["content"]
         return JSONResponse(content={"ok": True, "answer": answer.strip(), "source": "ai", "model": model_name})
     except Exception as ollama_err:
-        logger.warning(f"[Chat] Ollama failed ({ollama_err}), using context-aware fallback")
-
-    # ── Context-aware smart fallback (no AI available) ────────────────────────
-    facts = _extract_wound_facts(req.wound_context)
-    answer = _smart_answer(question, facts)
-    return JSONResponse(content={"ok": True, "answer": answer, "source": "analysis-based"})
+        logger.warning(f"[Chat] Ollama failed ({ollama_err})")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "ok": False,
+                "error": f"Follow-up chat unavailable because Ollama failed: {ollama_err}",
+                "source": "ollama",
+            },
+        )
 
 
 # ===== WOUND PROFILE MANAGEMENT ENDPOINTS =====

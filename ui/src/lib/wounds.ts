@@ -336,3 +336,19 @@ export async function deleteWound(woundId: string): Promise<void> {
     throw new Error(`Delete wound failed (${res.status}): ${await readErrorBody(res)}`);
   }
 }
+
+export async function deleteWoundImage(woundId: string, imageRef: string): Promise<void> {
+  const ref = (imageRef || "").trim();
+  if (!ref) throw new Error("Image reference is required");
+
+  const res = await authFetch(
+    `${BACKEND_URL}/wounds/${encodeURIComponent(woundId)}/images/${encodeURIComponent(ref)}`,
+    {
+      method: "DELETE",
+    }
+  );
+
+  if (!res.ok) {
+    throw new Error(`Delete image failed (${res.status}): ${await readErrorBody(res)}`);
+  }
+}

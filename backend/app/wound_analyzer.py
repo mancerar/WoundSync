@@ -861,123 +861,21 @@ class WoundAnalyzer:
         }
     
     def _assess_healing(self, measurements: Dict, color_analysis: Dict, image_path: Optional[str] = None) -> Dict:
-        """Assess wound healing status using AI when available, rules as fallback."""
+        """Assess wound healing status using AI only (no rule-based fallback)."""
 
-        # ==== TRY AI FIRST — returns complete structured result if successful ====
-        if self.ai_feedback is not None:
-            try:
-                ai_result = self.ai_feedback.generate_full_assessment({
-                    'measurements': measurements,
-                    'color_analysis': color_analysis,
-                    'image_path': image_path,
-                })
-                if ai_result:
-                    print(f"[AI Feedback] Generated using: {ai_result.get('assessment_method', 'unknown')}")
-                    return ai_result
-            except Exception as e:
-                print(f"[AI Feedback] Error: {e}. Falling back to rule-based assessment.")
+        if self.ai_feedback is None:
+            raise RuntimeError("AI feedback is disabled. This setup requires Gemini AI for healing assessment.")
 
-        # ==== RULE-BASED FALLBACK (only used when AI is unavailable) ====
-        concerns = []
-        healing_indicators = []
-        severity = "mild"
-        healing_stage = "inflammatory"
-        healing_progress = "normal"
+        ai_result = self.ai_feedback.generate_full_assessment({
+            'measurements': measurements,
+            'color_analysis': color_analysis,
+            'image_path': image_path,
+        })
+        if not ai_result:
+            raise RuntimeError("Gemini returned no healing assessment.")
 
-        area_cm2 = measurements.get("area_cm2", 0)
-        length_cm = measurements.get("length_cm", 0)
-        width_cm = measurements.get("width_cm", 0)
-
-        # --- Small wound safety gate ---
-        SMALL_WOUND_AREA_CM2 = 1.0
-        SMALL_WOUND_LENGTH_CM = 2.5
-
-        is_small_wound = (
-            area_cm2 < SMALL_WOUND_AREA_CM2 and
-            length_cm < SMALL_WOUND_LENGTH_CM
-        )
-
-        if area_cm2 > 15:
-            concerns.append("Very large wound area requiring specialized care")
-            severity = "severe"
-            healing_stage = "chronic"
-        elif area_cm2 > 8:
-            concerns.append("Large wound area - extended healing time expected")
-            severity = "moderate"
-        elif area_cm2 > 3:
-            concerns.append("Moderate wound size")
-            if severity == "mild":
-                severity = "moderate"
-
-        if length_cm > 0 and width_cm > 0:
-            aspect_ratio = max(length_cm, width_cm) / min(length_cm, width_cm)
-            if aspect_ratio > 3:
-                concerns.append("Irregular wound shape may complicate healing")
-
-        color_desc = color_analysis.get("color_description", "")
-        redness = color_analysis.get("redness_level", 0)
-        darkness = color_analysis.get("darkness_level", 0)
-
-        if "pink" in color_desc or "healing" in color_desc:
-            healing_indicators.append("Healthy pink coloration")
-            healing_stage = "proliferative"
-            healing_progress = "good"
-        
-        elif "red" in color_desc:
-            healing_stage = "inflammatory"
-
-            if redness > 0.8:
-                concerns.append("Marked inflammation observed")
-
-                # Only escalate to severe if NOT a small wound
-                if not is_small_wound:
-                    severity = "severe"
-                    healing_progress = "delayed"
-                else:
-                    healing_progress = "normal"
-
-            elif redness > 0.5:
-                healing_indicators.append("Moderate inflammation - normal healing response")
-            else:
-                healing_indicators.append("Mild inflammation")
-
-        if "yellow" in color_desc or "infected" in color_desc:
-            concerns.append("Yellow discoloration suggests possible infection")
-            severity = "severe"
-            healing_progress = "impaired"
-
-        if "green" in color_desc:
-            concerns.append("Green coloration indicates bacterial infection")
-            severity = "severe"
-            healing_progress = "infected"
-
-        if "dark" in color_desc or "necrotic" in color_desc or darkness > 0.7:
-            concerns.append("Dark tissue suggests necrosis or poor circulation")
-            severity = "severe"
-            healing_progress = "compromised"
-
-        recommendations = self._generate_treatment_recommendations(
-            severity, healing_stage, concerns, color_desc=color_analysis.get("color_description", "")
-        )
-        healing_prediction = self._predict_healing_time(measurements, severity, healing_stage, color_analysis)
-        infection_risk = self._estimate_infection_risk(measurements, severity, healing_stage, color_analysis)
-        stitches = self._assess_stitches_need(measurements, severity, healing_stage, color_analysis)
-        scar_risk = self._estimate_scar_risk(measurements, severity, healing_stage, color_analysis)
-
-        return {
-            "healing_stage": healing_stage,
-            "healing_progress": healing_progress,
-            "severity": severity,
-            "concerns": concerns,
-            "healing_indicators": healing_indicators,
-            "recommendations": recommendations,
-            "healing_time_prediction": healing_prediction,
-            "infection_risk": infection_risk,
-            "stitches": stitches,
-            "scar_risk": scar_risk,
-            "overall_assessment": self._generate_overall_assessment(severity, healing_stage, area_cm2),
-            "assessment_method": "Rule-based heuristics"
-        }
+        print(f"[AI Feedback] Generated using: {ai_result.get('assessment_method', 'unknown')}")
+        return ai_result
     
     def _generate_treatment_recommendations(self, severity: str, healing_stage: str, concerns: list, color_desc: str = "") -> Dict:
         """Generate detailed treatment recommendations."""
