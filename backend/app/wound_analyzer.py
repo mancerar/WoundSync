@@ -135,8 +135,35 @@ class WoundAnalyzer:
             # Merge enhanced into color_analysis so AI post-processor has color_percentages
             merged_color_analysis = {**color_analysis, **enhanced_color_analysis}
             
+            # Update redness_level to match the red percentage from color_percentages
+            # This makes the "Redness Level" display consistent with the red percentage
+            color_percentages = merged_color_analysis.get('color_percentages', {})
+            red_pct = color_percentages.get('red', 0)
+            merged_color_analysis['redness_level'] = round(red_pct / 100.0, 2)  # Convert to 0-1 scale
+            
             # Generate healing assessment (pass merged so post-processor gets color_percentages)
             healing_assessment = self._assess_healing(measurements, merged_color_analysis, image_path=image_path)
+            
+            # CRITICAL: Use Gemini's measurements AND color analysis from healing_assessment
+            # Gemini analyzes the actual image and provides accurate measurements and colors
+            # Traditional CV measurements/colors are only used as a fallback if Gemini fails
+            gemini_measurements = healing_assessment.get("measurements", {})
+            gemini_color_analysis = healing_assessment.get("color_analysis", {})
+            
+            if gemini_measurements and gemini_measurements.get('length_cm', 0) > 0:
+                print(f"[Wound Analyzer] Using Gemini measurements: {gemini_measurements}")
+                final_measurements = gemini_measurements
+            else:
+                print(f"[Wound Analyzer] Gemini measurements unavailable, using Traditional CV: {measurements}")
+                final_measurements = measurements
+            
+            # Use Gemini's color analysis if available (it's more accurate from image analysis)
+            if gemini_color_analysis and gemini_color_analysis.get('color_percentages'):
+                print(f"[Wound Analyzer] Using Gemini color analysis: {gemini_color_analysis.get('color_percentages', {})}")
+                final_color_analysis = gemini_color_analysis
+            else:
+                print(f"[Wound Analyzer] Gemini color analysis unavailable, using Traditional CV")
+                final_color_analysis = merged_color_analysis
             
             # Generate visual output if requested
             visual_output_path = None
@@ -147,8 +174,8 @@ class WoundAnalyzer:
                 "wound_detected": wound_detected,
                 "confidence": confidence,
                 "method": getattr(self, "method_name", "Traditional Computer Vision"),
-                "measurements": measurements,
-                "color_analysis": merged_color_analysis,
+                "measurements": final_measurements,  # Use Gemini's measurements, not Traditional CV
+                "color_analysis": final_color_analysis,  # Use Gemini's color analysis, not Traditional CV
                 "healing_assessment": healing_assessment,
                 "recommendations": healing_assessment.get("recommendations", {}),
                 "overall_assessment": healing_assessment.get("overall_assessment", ""),
@@ -752,8 +779,10 @@ class WoundAnalyzer:
     def _ppcm_prior_from_image_size(self, image: np.ndarray) -> Optional[float]:
         """Dataset prior: estimate px/cm from image width.
 
-        Assumption: images around 700 px wide map to ~120 px/cm (updated to match
-        calibration.json default). Scales linearly by width. Clamped to [40, 300] px/cm.
+        Assumption: Modern phone cameras at typical wound-photographing distance
+        map to ~200 px/cm. Scales linearly by width. Clamped to [80, 400] px/cm.
+        
+        Note: Without a reference object, this is just an educated guess.
         """
         try:
             h, w = image.shape[:2]
@@ -763,9 +792,9 @@ class WoundAnalyzer:
             ppcm_cal = get_ppcm_from_calibration(w, h)
             if ppcm_cal is not None:
                 return float(ppcm_cal)
-            base_ppcm = 120.0
+            base_ppcm = 200.0  # Updated from 120 to give more conservative (smaller) measurements
             ppcm = base_ppcm * (w / 700.0)
-            return float(np.clip(ppcm, 40.0, 300.0))
+            return float(np.clip(ppcm, 80.0, 400.0))
         except Exception:
             return None
 
@@ -836,21 +865,26 @@ class WoundAnalyzer:
         saturation = avg_color_hsv[1] / 255.0
         brightness = avg_color_hsv[2] / 255.0
         
-        # Determine color description
+        # Determine color description (avoid premature infection labels)
         if hue < 10 or hue > 170:  # Red range
             if saturation > 0.3:
                 color_desc = "red/inflamed"
             else:
                 color_desc = "pink/healing"
         elif 10 <= hue < 30:  # Yellow/orange range
-            color_desc = "yellow/infected"
+            # Don't automatically label as infected - let AI decide
+            if brightness < 0.4:
+                color_desc = "brown/scab"
+            else:
+                color_desc = "yellow/tan"
         elif 30 <= hue < 85:  # Green range
-            color_desc = "green/infected"
+            color_desc = "green/concerning"
         else:  # Blue/purple range
-            color_desc = "dark/necrotic"
+            color_desc = "dark/bruised"
         
-        # Calculate metrics
-        redness_level = saturation if (hue < 10 or hue > 170) else 0.0
+        # Calculate metrics - use red percentage from color_percentages instead of HSV saturation
+        # This makes redness_level consistent with the red percentage shown to users
+        redness_level = 0.0  # Will be set from color_percentages later
         darkness_level = 1.0 - brightness
         
         return {

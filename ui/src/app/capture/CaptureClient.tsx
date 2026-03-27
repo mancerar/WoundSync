@@ -549,6 +549,9 @@ export default function CapturePage() {
                     {perimeter > 0 && (
                       <div>Perimeter: {perimeter.toFixed(2)} cm</div>
                     )}
+                    <div style={{ fontSize: 12, color: "#888", marginTop: 4, fontStyle: "italic" }}>
+                      Note: Measurements are estimates. For accuracy, include a reference object (coin, ruler) in the photo.
+                    </div>
                   </div>
                 </>
               )}
@@ -561,7 +564,6 @@ export default function CapturePage() {
                   </div>
                   <div style={{ marginTop: 6, paddingLeft: 10 }}>
                     <div>Description: {color.color_description}</div>
-                    <div>Redness Level: {(rednessLevel * 100).toFixed(1)}%</div>
 
                     {color.color_percentages && (
                       <div style={{ marginTop: 4 }}>

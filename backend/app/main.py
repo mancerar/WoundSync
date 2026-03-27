@@ -1239,58 +1239,126 @@ async def predict(
         wound_preds = [p for p in all_preds if pred_class(p).lower() in ["wound", "abrasion", "cut", "laceration"]]
         candidates = wound_preds if wound_preds else all_preds
 
+        img_w, img_h = pil_img.size  # Get image dimensions early for Gemini fallback
+        detection_method = "roboflow"  # Track which method detected the wound
+        
+        # FALLBACK: If Roboflow fails, try Gemini detection
         if not candidates:
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "ok": True,
-                    "detected": False,
-                    "confidence": 0.0,
-                    "message": "No predictions returned from the model.",
-                    "min_confidence": MIN_CONFIDENCE,
-                    "debug": rf_json if debug else None,
-                },
+            logger.info("🔄 Roboflow detection failed - attempting Gemini fallback...")
+            
+            # Save temp image for Gemini
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp_file:
+                tmp_path = tmp_file.name
+                pil_img.save(tmp_path, format='JPEG', quality=95)
+            
+            try:
+                from app.ai_feedback import AIFeedbackGenerator
+                ai_gen = AIFeedbackGenerator(use_ai=True)
+                gemini_detection = ai_gen.detect_wound_with_gemini(tmp_path, img_w, img_h)
+                os.unlink(tmp_path)
+                
+                if gemini_detection and gemini_detection.get('detected'):
+                    logger.info(f"✅ Gemini detected wound: confidence={gemini_detection['confidence']:.1%}")
+                    # Use Gemini's detection but skip bounding box (inaccurate)
+                    # Set bbox to None so we skip drawing the box
+                    bbox = None
+                    conf = gemini_detection['confidence']
+                    poly = None
+                    detection_method = "gemini"
+                    
+                    # Create a synthetic prediction object for downstream processing
+                    best = {
+                        'class': gemini_detection.get('class', 'wound'),
+                        'confidence': conf,
+                        'x': 0,
+                        'y': 0,
+                        'width': 0,
+                        'height': 0
+                    }
+                else:
+                    logger.info("❌ Gemini also failed to detect wound")
+                    return JSONResponse(
+                        status_code=200,
+                        content={
+                            "ok": True,
+                            "detected": False,
+                            "confidence": 0.0,
+                            "message": "No wound detected by Roboflow or Gemini AI.",
+                            "min_confidence": MIN_CONFIDENCE,
+                            "debug": rf_json if debug else None,
+                        },
+                    )
+            except Exception as e:
+                logger.error(f"Gemini fallback failed: {e}")
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "ok": True,
+                        "detected": False,
+                        "confidence": 0.0,
+                        "message": "No predictions returned from the model.",
+                        "min_confidence": MIN_CONFIDENCE,
+                        "debug": rf_json if debug else None,
+                    },
+                )
+        else:
+            # Roboflow succeeded - use its results
+            candidates_sorted = sorted(
+                candidates,
+                key=lambda p: (pred_conf(p), bbox_area_of_pred(p, img_w, img_h)),
+                reverse=True,
             )
+            best = candidates_sorted[0]
+            conf = pred_conf(best)
+            bbox = parse_bbox(best, img_w, img_h)
+            poly = parse_polygon_points(best)
 
-        img_w, img_h = pil_img.size
-        candidates_sorted = sorted(
-            candidates,
-            key=lambda p: (pred_conf(p), bbox_area_of_pred(p, img_w, img_h)),
-            reverse=True,
-        )
-        best = candidates_sorted[0]
-        conf = pred_conf(best)
-        bbox = parse_bbox(best, img_w, img_h)
-        poly = parse_polygon_points(best)
+            if not bbox or conf < MIN_CONFIDENCE:
+                return JSONResponse(
+                    status_code=200,
+                    content={
+                        "ok": True,
+                        "detected": False,
+                        "confidence": conf,
+                        "message": "No wound detected or not confident enough.",
+                        "min_confidence": MIN_CONFIDENCE,
+                        "debug": rf_json if debug else None,
+                    },
+                )
 
-        if not bbox or conf < MIN_CONFIDENCE:
-            return JSONResponse(
-                status_code=200,
-                content={
-                    "ok": True,
-                    "detected": False,
-                    "confidence": conf,
-                    "message": "No wound detected or not confident enough.",
-                    "min_confidence": MIN_CONFIDENCE,
-                    "debug": rf_json if debug else None,
-                },
-            )
-
-        # Draw Roboflow bounding box on image
+        # Draw bounding box on image (only for Roboflow detections)
         annotated_image_b64 = None
-        try:
-            import cv2
-            import numpy as np
-            img_np = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
-            x1, y1, x2, y2 = bbox
-            cv2.rectangle(img_np, (x1, y1), (x2, y2), (0, 255, 0), 3)
-            text = f"Confidence: {conf:.1%}"
-            text_y = min(img_np.shape[0] - 10, y2 + 30)
-            cv2.putText(img_np, text, (x1, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
-            _, buffer = cv2.imencode('.jpg', img_np)
-            annotated_image_b64 = base64.b64encode(buffer).decode("utf-8")
-        except Exception as e:
-            logger.error(f"Failed to create annotated image: {e}")
+        if bbox:  # Only draw box if we have valid coordinates
+            try:
+                import cv2
+                import numpy as np
+                img_np = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
+                x1, y1, x2, y2 = bbox
+                cv2.rectangle(img_np, (x1, y1), (x2, y2), (0, 255, 0), 3)
+                
+                # Add detection method label
+                method_label = "Roboflow Detection"
+                cv2.putText(img_np, method_label, (x1, max(y1 - 10, 20)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                
+                text = f"Confidence: {conf:.1%}"
+                text_y = min(img_np.shape[0] - 10, y2 + 30)
+                cv2.putText(img_np, text, (x1, text_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                _, buffer = cv2.imencode('.jpg', img_np)
+                annotated_image_b64 = base64.b64encode(buffer).decode("utf-8")
+            except Exception as e:
+                logger.error(f"Failed to create annotated image: {e}")
+        else:
+            # No bounding box - return original image for Gemini detections
+            logger.info("Skipping bounding box annotation (Gemini detection)")
+            try:
+                import io
+                img_buffer = io.BytesIO()
+                pil_img.save(img_buffer, format='JPEG', quality=95)
+                annotated_image_b64 = base64.b64encode(img_buffer.getvalue()).decode("utf-8")
+            except Exception as e:
+                logger.error(f"Failed to encode original image: {e}")
 
         # Perform comprehensive wound analysis with Gemini
         comprehensive_analysis = None
@@ -1310,7 +1378,10 @@ async def predict(
             logger.warning(f"Comprehensive wound analysis unavailable: {e}")
             comprehensive_analysis = None
 
-        assessment = compute_wound_assessment(pil_img, bbox, poly, conf=conf)
+        # Only compute traditional assessment if we have a valid bounding box (Roboflow detections)
+        assessment = None
+        if bbox:
+            assessment = compute_wound_assessment(pil_img, bbox, poly, conf=conf)
 
         # Build response with comprehensive analysis data
         response_content = {
@@ -1318,12 +1389,17 @@ async def predict(
             "detected": True,
             "confidence": conf,
             "class": pred_class(best),
-            "bbox": {"x1": bbox[0], "y1": bbox[1], "x2": bbox[2], "y2": bbox[3]},
             "annotated_image": annotated_image_b64,
-            "assessment": assessment,
+            "detection_method": detection_method,  # Track which method detected the wound
             "min_confidence": MIN_CONFIDENCE,
             "debug": rf_json if debug else None,
         }
+        
+        # Only include bbox and traditional assessment if we have valid coordinates (Roboflow detections)
+        if bbox:
+            response_content["bbox"] = {"x1": bbox[0], "y1": bbox[1], "x2": bbox[2], "y2": bbox[3]}
+        if assessment:
+            response_content["assessment"] = assessment
 
         # Merge comprehensive analysis data into response
         if comprehensive_analysis and comprehensive_analysis.get("wound_detected"):
@@ -1332,7 +1408,12 @@ async def predict(
             response_content["healing_assessment"] = comprehensive_analysis.get("healing_assessment", {})
             response_content["recommendations"] = comprehensive_analysis.get("recommendations", {})
             response_content["overall_assessment"] = comprehensive_analysis.get("overall_assessment", "")
-            response_content["method"] = comprehensive_analysis.get("method", "Traditional Computer Vision Detection using Roboflow and Gemini Models")
+            
+            # Update method display based on detection method
+            if detection_method == "gemini":
+                response_content["method"] = "Gemini AI Detection + Analysis"
+            else:
+                response_content["method"] = comprehensive_analysis.get("method", "Traditional Computer Vision Detection using Roboflow and Gemini Models")
 
         return JSONResponse(
             status_code=200,
