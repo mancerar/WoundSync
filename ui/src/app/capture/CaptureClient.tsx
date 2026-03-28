@@ -325,21 +325,39 @@ export default function CapturePage() {
         <div style={{ fontWeight: 700, marginBottom: 8, color: "#1a3d7a" }}>
           📸 Tips for Best Results:
         </div>
-        <ul style={{ margin: 0, paddingLeft: 20, color: "#333" }}>
-          <li>Hold your device steady (rest your hand on a stable surface)</li>
-          <li>Use good lighting - natural daylight works best</li>
-          <li>Tap to focus on the wound before taking the photo</li>
-          <li>
-            Avoid glare - wipe moisture and tilt slightly so light doesn't
-            reflect off shiny skin
-          </li>
-          <li>Keep the wound centered in the frame</li>
-          <li>
-            Don't zoom in too much - include some surrounding skin for context
-          </li>
-          <li>Take the photo from directly above the wound (perpendicular)</li>
-          <li>Ensure the wound is clean and visible before photographing</li>
-        </ul>
+
+        <div style={{ color: "#333" }}>
+          <div style={{ marginBottom: 4 }}>
+            - Hold your device steady (rest your hand on a stable surface)
+          </div>
+          <div style={{ marginBottom: 4 }}>
+            - Use good lighting, natural daylight works best
+          </div>
+          <div style={{ marginBottom: 4 }}>
+            - Avoid glare or shiny reflections
+          </div>
+          <div style={{ marginBottom: 4 }}>
+            - Keep the wound centered in the frame
+          </div>
+          <div style={{ marginBottom: 4 }}>
+            - Stay about 1 foot away from the wound
+          </div>
+          <div style={{ marginBottom: 4 }}>
+            - Include some surrounding skin for context
+          </div>
+          <div style={{ marginBottom: 4 }}>
+            - Take the photo from directly above the wound
+          </div>
+          <div style={{ marginBottom: 4 }}>
+            - Keep the background plain and distraction-free
+          </div>
+          <div style={{ marginBottom: 4 }}>
+            - Only one wound in the image
+          </div>
+          <div>
+            - Make sure the wound is clean and visible
+          </div>
+        </div>
       </div>
 
       <div

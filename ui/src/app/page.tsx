@@ -51,16 +51,17 @@ function LoginContent() {
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
     setMessage(null);
+
     if (!email) {
       setMessage({ type: "error", text: "Please enter your email." });
       return;
     }
+
     if (!pw) {
       setMessage({ type: "error", text: "Please enter your password to continue." });
       return;
     }
-    
-    // If Firebase auth is not enabled, use local fallback and navigate.
+
     if (!authEnabled) {
       setUser({ email, ...(username ? { username } : {}) });
       setMessage({ type: "success", text: "Signed in successfully. Redirecting to your dashboard..." });
@@ -69,7 +70,7 @@ function LoginContent() {
     }
 
     setIsSubmitting(true);
-    
+
     signIn(email, pw)
       .then(() => {
         setUser({ email, ...(username ? { username } : {}) });
@@ -80,11 +81,11 @@ function LoginContent() {
         const errorCode = err?.code;
         let errorMessage = "Sign in failed";
 
-        if (errorCode === "auth/user-not-found" ) {
+        if (errorCode === "auth/user-not-found") {
           errorMessage = "Account not found. Please create a new account.";
         } else if (errorCode === "auth/invalid-credential") {
           errorMessage = "Sign-in failed. Check your email/password, and make sure Email/Password sign-in is enabled in Firebase Authentication.";
-        }else if (errorCode === "auth/wrong-password") {
+        } else if (errorCode === "auth/wrong-password") {
           errorMessage = "Incorrect password. Please try again.";
         } else if (errorCode === "auth/invalid-login-credentials") {
           errorMessage = "Incorrect email or password. If needed, use Forgot Password to reset access.";
@@ -106,45 +107,34 @@ function LoginContent() {
   async function onForgotPassword() {
     const targetEmail = (email || "").trim();
     setMessage(null);
+
     if (!targetEmail) {
       setMessage({ type: "error", text: "Enter your email first, then select Forgot Password." });
       return;
     }
 
     setIsResetSending(true);
+
     try {
-      // Use SendGrid via our backend for custom branded emails
-      const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000";
-      const resetUrl = `${window.location.origin}/reset-password`;
-      
-      const response = await fetch(`${backendUrl}/auth/request-password-reset`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          email: targetEmail,
-          reset_url: resetUrl,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.detail || "Failed to send reset email");
-      }
-
-      setMessage({ 
-        type: "success", 
-        text: "Password reset email sent! Check your inbox (and spam folder) for a link from WoundSync." 
+      await resetPassword(targetEmail);
+      setMessage({
+        type: "success",
+        text: "Password reset email sent. Check your inbox and spam folder for the reset link.",
       });
     } catch (err: unknown) {
       let errorMessage = "Could not send reset email. Please try again.";
 
-      if (err instanceof Error) {
-        if (err.message.includes("Email service is not configured")) {
-          errorMessage = "Email service is temporarily unavailable. Please try again later.";
-        } else if (err.message.includes("Failed to send email")) {
-          errorMessage = "Failed to send email. Please check your email address and try again.";
+      const code = (err as { code?: string })?.code;
+
+      if (code === "auth/invalid-email") {
+        errorMessage = "Invalid email address.";
+      } else if (code === "auth/user-not-found") {
+        errorMessage = "If an account exists for that email, a reset link will be sent.";
+      } else if (code === "auth/too-many-requests") {
+        errorMessage = "Too many attempts. Please try again later.";
+      } else if (err instanceof Error && err.message) {
+        if (err.message.includes("Password reset email is unavailable")) {
+          errorMessage = "Password reset is currently unavailable.";
         } else {
           errorMessage = err.message;
         }
@@ -178,7 +168,6 @@ function LoginContent() {
         </div>
       </div>
 
-      {/* About */}
       <p className="mt-4 text-[15px] leading-6 text-slate-700">
         WoundSync lets you capture wound photos and see objective trends over
         time, including size, appearance, and overall progress. It uses
@@ -186,7 +175,6 @@ function LoginContent() {
         visits.
       </p>
 
-      {/* Log in */}
       <h2 className="mt-5 text-xl font-semibold text-slate-800">
         Log in
       </h2>
@@ -205,7 +193,6 @@ function LoginContent() {
         </div>
       ) : null}
 
-      {/* Form */}
       <form onSubmit={onSubmit} className="mt-4 space-y-4">
         <div className="relative">
           <UserIcon className="pointer-events-none absolute left-3 top-1/2 h-5 w-5 -translate-y-1/2 text-slate-400" />
@@ -272,7 +259,6 @@ function LoginContent() {
         </button>
       </form>
 
-      {/* Auth link */}
       <p className="mt-4 text-slate-600">
         No account?{" "}
         <Link href="/signup" className="font-medium text-blue-600">
@@ -280,7 +266,6 @@ function LoginContent() {
         </Link>
       </p>
 
-      {/* Badges */}
       <div className="mt-4 flex flex-wrap gap-3">
         <span className="rounded-full border border-blue-100 bg-blue-50 px-4 py-1.5 text-sm text-slate-700">
           🔒 Private &amp; secure

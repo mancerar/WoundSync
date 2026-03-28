@@ -11,7 +11,7 @@ import {
   CartesianGrid,
   Legend,
 } from "recharts";
-import { getWoundImages } from "@/lib/wounds";
+import { getWoundImages, isAuthStartupError } from "@/lib/wounds";
 
 interface ChartData {
   dates: string[];
@@ -23,88 +23,120 @@ interface ChartData {
 
 type ActiveMetric = "area" | "infection" | "redness";
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export function ProgressChart({ profileId }: { profileId: string }) {
   const [data, setData] = useState<ChartData | null>(null);
   const [loading, setLoading] = useState(true);
   const [activeMetric, setActiveMetric] = useState<ActiveMetric>("area");
 
   useEffect(() => {
-    loadChartData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [profileId]);
+    let cancelled = false;
 
-  async function loadChartData() {
-    try {
-      setLoading(true);
-
-      // Use Dynamo-backed wound images for all chart metrics
-      const images = await getWoundImages(profileId);
-      const items = (images || []).filter(
-        (it: any) => (it.sk && it.sk.includes("#IMG#")) || it.imageKey
-      );
-
-      if (!items.length) {
+    async function loadChartData() {
+      if (!profileId) {
         setData(null);
+        setLoading(false);
         return;
       }
 
-      const dates: string[] = [];
-      const areas: number[] = [];
-      const infectionRisk: number[] = [];
-      const rednessLevel: number[] = [];
+      setLoading(true);
 
-      // Sort oldest -> newest by timestamp / sk
-      const sorted = [...items].sort((a: any, b: any) => {
-        const aTs = a.timestamp || a.sk || "";
-        const bTs = b.timestamp || b.sk || "";
-        return new Date(aTs).getTime() - new Date(bTs).getTime();
-      });
+      try {
+        let images: any[] = [];
 
-      for (const it of sorted) {
-        const recAt = it.timestamp || it.created_at || it.sk || new Date().toISOString();
-        const analysis = it.analysis || {};
-        const measurements = analysis.measurements || {};
-
-        // Area comes from analyzer measurements
-        const area = Number(measurements.area_cm2 ?? 0);
-
-        // Infection risk: derive from heuristic assessment.urgency ("home" | "soon" | "urgent")
-        const assessment = analysis.assessment || {};
-        const urgency: string | undefined = assessment.urgency;
-        let infectionNum = 1;
-        if (typeof urgency === "string") {
-          const v = urgency.toLowerCase();
-          if (v === "soon") infectionNum = 2;
-          else if (v === "urgent") infectionNum = 3;
-          else infectionNum = 1;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            images = await getWoundImages(profileId);
+            break;
+          } catch (error) {
+            if (isAuthStartupError(error) && attempt < 3) {
+              await sleep(900 * attempt);
+              if (cancelled) return;
+              continue;
+            }
+            throw error;
+          }
         }
 
-        // Redness level: numeric 0–1 from color_analysis.redness_level
-        const colorAnalysis = analysis.color_analysis || {};
-        const rednessVal = Number(colorAnalysis.redness_level ?? 0);
-        // Keep as 0–1; charts use continuous domain
-        const rednessNum = Math.max(0, Math.min(1, rednessVal));
+        if (cancelled) return;
 
-        dates.push(recAt);
-        areas.push(area);
-        infectionRisk.push(infectionNum);
-        rednessLevel.push(rednessNum);
+        const items = (images || []).filter(
+          (it: any) => (it.sk && it.sk.includes("#IMG#")) || it.imageKey
+        );
+
+        if (!items.length) {
+          setData(null);
+          return;
+        }
+
+        const dates: string[] = [];
+        const areas: number[] = [];
+        const infectionRisk: number[] = [];
+        const rednessLevel: number[] = [];
+
+        const sorted = [...items].sort((a: any, b: any) => {
+          const aTs = a.timestamp || a.sk || "";
+          const bTs = b.timestamp || b.sk || "";
+          return new Date(aTs).getTime() - new Date(bTs).getTime();
+        });
+
+        for (const it of sorted) {
+          const recAt = it.timestamp || it.created_at || it.sk || new Date().toISOString();
+          const analysis = it.analysis || {};
+          const measurements = analysis.measurements || {};
+
+          const area = Number(measurements.area_cm2 ?? 0);
+
+          const assessment = analysis.assessment || {};
+          const urgency: string | undefined = assessment.urgency;
+          let infectionNum = 1;
+          if (typeof urgency === "string") {
+            const v = urgency.toLowerCase();
+            if (v === "soon") infectionNum = 2;
+            else if (v === "urgent") infectionNum = 3;
+          }
+
+          const colorAnalysis = analysis.color_analysis || {};
+          const rednessVal = Number(colorAnalysis.redness_level ?? 0);
+          const rednessNum = Math.max(0, Math.min(1, rednessVal));
+
+          dates.push(recAt);
+          areas.push(area);
+          infectionRisk.push(infectionNum);
+          rednessLevel.push(rednessNum);
+        }
+
+        setData({
+          dates,
+          area_cm2: areas,
+          infection_risk: infectionRisk,
+          redness_level: rednessLevel,
+          record_count: dates.length,
+        });
+      } catch (error) {
+        if (cancelled) return;
+
+        if (!isAuthStartupError(error)) {
+          console.warn("Progress chart load skipped:", error);
+        }
+
+        setData(null);
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
       }
-
-      setData({
-        dates,
-        area_cm2: areas,
-        infection_risk: infectionRisk,
-        redness_level: rednessLevel,
-        record_count: dates.length,
-      });
-    } catch (error) {
-      console.error("Failed to load chart data:", error);
-      setData(null);
-    } finally {
-      setLoading(false);
     }
-  }
+
+    loadChartData();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [profileId]);
 
   const points = useMemo(() => {
     if (!data || !data.dates?.length) return [];
@@ -148,9 +180,9 @@ export function ProgressChart({ profileId }: { profileId: string }) {
       yDomain: [1, 3],
     },
     redness: {
-      label: "Redness Level (1=Low, 3=High)",
+      label: "Redness Level (0-1)",
       color: "#ea580c",
-      yDomain: [1, 3],
+      yDomain: [0, 1],
     },
   };
 
@@ -221,7 +253,7 @@ export function ProgressChart({ profileId }: { profileId: string }) {
             <Tooltip
               formatter={(value: any) =>
                 activeMetric === "area"
-                  ? [`${(value as number).toFixed(2)} cm²`, "Area"]
+                  ? [`${Number(value).toFixed(2)} cm²`, "Area"]
                   : [value, activeMetric === "infection" ? "Infection" : "Redness"]
               }
               labelFormatter={(value) =>

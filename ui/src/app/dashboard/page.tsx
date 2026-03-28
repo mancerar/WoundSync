@@ -14,6 +14,7 @@ import {
   getWoundImages,
   createWoundProfile,
   deleteWoundImage,
+  isAuthStartupError,
 } from "@/lib/wounds";
 import { Plus, Flame, Trophy, Target, ChevronRight, Camera, Trash2 } from "lucide-react";
 
@@ -59,6 +60,10 @@ type ProfileDetail = ProfileSummary & {
 const BACKEND_URL = (
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000"
 ).replace(/\/$/, "");
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function getRecordedAt(item: any): string {
   return (
@@ -242,10 +247,21 @@ export default function Dashboard() {
 
   const loadSeqRef = useRef(0);
   const selectedProfileIdRef = useRef<string | null>(null);
+  const authUidRef = useRef<string | null>(null);
 
   useEffect(() => {
     selectedProfileIdRef.current = selectedProfileId;
   }, [selectedProfileId]);
+
+  useEffect(() => {
+    authUidRef.current = fbUser?.uid ?? null;
+  }, [fbUser]);
+
+  function clearDashboardState() {
+    setProfiles([]);
+    setDetailsById({});
+    setSelectedProfileId(null);
+  }
 
   async function handleNewWound(name?: string) {
     if (!fbUser) {
@@ -260,22 +276,51 @@ export default function Dashboard() {
       setNewWoundName("");
       router.push(`/capture?woundId=${encodeURIComponent(woundId)}`);
     } catch (err: any) {
-      console.error("Create wound failed:", err);
+      console.warn("Create wound failed:", err);
       alert("Could not create wound: " + (err?.message ?? String(err)));
     } finally {
       setCreatingWound(false);
     }
   }
 
-  async function loadDashboardData(preferredProfileId?: string | null) {
+  async function loadDashboardData(preferredProfileId?: string | null, requestUid?: string | null) {
     const seq = ++loadSeqRef.current;
+    const targetUid = requestUid ?? authUidRef.current;
 
     try {
       setLoading(true);
 
-      const data: any[] = await getUserWounds();
+      let data: any[] | null = null;
+
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          data = await getUserWounds();
+          break;
+        } catch (error: any) {
+          if (seq !== loadSeqRef.current) return;
+
+          const authChanged = authUidRef.current !== targetUid;
+          if (authChanged) return;
+
+          if (isAuthStartupError(error)) {
+            if (attempt < 2) {
+              await sleep(800);
+              continue;
+            }
+            return;
+          }
+
+          console.warn("Dashboard load skipped:", error);
+          clearDashboardState();
+          return;
+        }
+      }
+
+      if (seq !== loadSeqRef.current) return;
+      if (authUidRef.current !== targetUid) return;
+
       const baseProfiles = normalizeProfiles(
-        (data || []).map((d: any) => ({
+        ((data || []) as any[]).map((d: any) => ({
           id: d.id,
           name: d.name ?? d.id,
           createdAt: d.last_timestamp,
@@ -286,23 +331,27 @@ export default function Dashboard() {
         }))
       );
 
-      if (seq !== loadSeqRef.current) return;
-
       if (!baseProfiles.length) {
-        setProfiles([]);
-        setDetailsById({});
-        setSelectedProfileId(null);
+        clearDashboardState();
         return;
       }
 
       const detailResults = await Promise.allSettled(
         baseProfiles.map(async (profile) => {
-          const rawItems = await getWoundImages(profile.id);
-          return buildProfileDetail(profile, rawItems);
+          try {
+            const rawItems = await getWoundImages(profile.id);
+            return buildProfileDetail(profile, rawItems);
+          } catch (error: any) {
+            if (!isAuthStartupError(error)) {
+              console.warn(`Skipping wound image load for ${profile.id}:`, error);
+            }
+            return buildProfileDetail(profile, []);
+          }
         })
       );
 
       if (seq !== loadSeqRef.current) return;
+      if (authUidRef.current !== targetUid) return;
 
       const detailsMap: Record<string, ProfileDetail> = {};
       const hydratedProfiles: ProfileSummary[] = baseProfiles.map((profile, index) => {
@@ -338,11 +387,14 @@ export default function Dashboard() {
 
       setSelectedProfileId(nextSelectedId);
     } catch (error: any) {
-      console.error("Failed to load dashboard data:", error);
-      alert("Error loading wound profiles: " + (error?.message ?? String(error)));
-      setProfiles([]);
-      setDetailsById({});
-      setSelectedProfileId(null);
+      if (seq !== loadSeqRef.current) return;
+      if (authUidRef.current !== targetUid) return;
+
+      if (!isAuthStartupError(error)) {
+        console.warn("Failed to load dashboard data:", error);
+      }
+
+      clearDashboardState();
     } finally {
       if (seq === loadSeqRef.current) {
         setLoading(false);
@@ -365,7 +417,7 @@ export default function Dashboard() {
     try {
       setDeletingImageRef(imageRef);
       await deleteWoundImage(selectedProfileId, imageRef);
-      await loadDashboardData(selectedProfileId);
+      await loadDashboardData(selectedProfileId, authUidRef.current);
     } catch (err: any) {
       alert("Could not delete this photo: " + (err?.message ?? String(err)));
     } finally {
@@ -375,21 +427,21 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (authEnabled && authLoading) {
+      loadSeqRef.current += 1;
       setLoading(true);
       return;
     }
 
     if (!fbUser) {
+      loadSeqRef.current += 1;
       setUsername(null);
-      setProfiles([]);
-      setDetailsById({});
-      setSelectedProfileId(null);
+      clearDashboardState();
       setLoading(false);
       return;
     }
 
     setUsername(getUser()?.username ?? fbUser.email ?? null);
-    void loadDashboardData(selectedProfileIdRef.current);
+    void loadDashboardData(selectedProfileIdRef.current, fbUser.uid);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fbUser, authLoading, authEnabled]);
 

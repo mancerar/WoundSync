@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { clearUser, getUser } from "@/lib/auth";
@@ -133,6 +134,19 @@ export default function Profile() {
 
   return (
     <div className="ws-container space-y-6">
+      <Link
+        href="/dashboard"
+        style={{
+          display: "inline-block",
+          color: "#2563eb",
+          textDecoration: "none",
+          fontWeight: 600,
+          marginBottom: 12,
+        }}
+      >
+        ← Back to Dashboard
+      </Link>
+
       <div>
         <h1 className="text-3xl font-extrabold tracking-tight sm:text-4xl">
           Profile

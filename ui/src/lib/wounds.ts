@@ -1,10 +1,10 @@
-// src/lib/wounds.ts
-
 import { getAuthToken } from "@/lib/auth";
 
 const BACKEND_URL = (
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000"
 ).replace(/\/$/, "");
+
+const DEFAULT_AUTH_ATTEMPTS = 4;
 
 async function readErrorBody(res: Response): Promise<string> {
   try {
@@ -19,52 +19,82 @@ async function wait(ms: number) {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function getFreshAuthToken(): Promise<string | null> {
-  // getAuthToken() should already wait for Firebase auth state.
-  // We call it again on retries so the token/user session has time to settle.
-  return await getAuthToken();
+function buildHeaders(
+  initHeaders?: HeadersInit,
+  extraHeaders?: Record<string, string>
+): Headers {
+  const headers = new Headers(initHeaders);
+
+  if (extraHeaders) {
+    for (const [key, value] of Object.entries(extraHeaders)) {
+      headers.set(key, value);
+    }
+  }
+
+  return headers;
 }
+
+function isUnauthorizedStatus(status: number) {
+  return status === 401 || status === 403;
+}
+
+export function isAuthStartupError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error ?? "");
+  return /not authenticated|unauthorized|\(401\)|\b401\b/i.test(message);
+}
+
+type AuthFetchOptions = {
+  maxAttempts?: number;
+};
 
 async function authFetch(
   input: RequestInfo | URL,
   init: RequestInit = {},
-  maxAttempts = 3
+  options: AuthFetchOptions = {}
 ): Promise<Response> {
+  const maxAttempts = options.maxAttempts ?? DEFAULT_AUTH_ATTEMPTS;
   let lastResponse: Response | null = null;
+  let lastHadToken = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    const token = await getFreshAuthToken();
+    const token = await getAuthToken(attempt > 1);
+    lastHadToken = !!token;
 
     if (!token) {
       if (attempt < maxAttempts) {
-        await wait(500 * attempt);
+        await wait(600 * attempt);
         continue;
       }
-      throw new Error("Not authenticated. Please sign in again.");
+      break;
     }
 
     const res = await fetch(input, {
       ...init,
-      headers: {
-        ...(init.headers || {}),
+      headers: buildHeaders(init.headers, {
         Authorization: `Bearer ${token}`,
-      },
+      }),
     });
 
-    if (res.status !== 401) {
+    if (!isUnauthorizedStatus(res.status)) {
       return res;
     }
 
     lastResponse = res;
 
     if (attempt < maxAttempts) {
-      await wait(500 * attempt);
-      continue;
+      await wait(600 * attempt);
     }
   }
 
-  if (lastResponse) return lastResponse;
-  throw new Error("Request failed before a response was received.");
+  if (lastResponse) {
+    return lastResponse;
+  }
+
+  if (!lastHadToken) {
+    throw new Error("Not authenticated. Please sign in again.");
+  }
+
+  throw new Error("Authentication failed. Please sign in again.");
 }
 
 export async function getWoundProfiles(): Promise<any[]> {

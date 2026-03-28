@@ -1,5 +1,3 @@
-// src/lib/auth.ts
-
 import { auth } from "@/firebase/firebase";
 import { onAuthStateChanged, type User as FirebaseAuthUser } from "firebase/auth";
 
@@ -10,36 +8,43 @@ export type User = {
 
 const KEY = "ws_user";
 
-async function waitForCurrentUser(timeoutMs = 1500): Promise<FirebaseAuthUser | null> {
+async function waitForCurrentUser(timeoutMs = 5000): Promise<FirebaseAuthUser | null> {
   const authInstance = auth;
   if (!authInstance) return null;
   if (authInstance.currentUser) return authInstance.currentUser;
 
   return await new Promise((resolve) => {
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let unsubscribe = () => {};
 
     const finish = (user: FirebaseAuthUser | null) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       unsubscribe();
       resolve(user);
     };
 
-    const unsubscribe = onAuthStateChanged(authInstance, (user) => {
+    unsubscribe = onAuthStateChanged(authInstance, (user) => {
       finish(user);
     });
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       finish(authInstance.currentUser);
     }, timeoutMs);
   });
 }
 
-export async function getAuthToken(): Promise<string | null> {
-  const user = await waitForCurrentUser();
+export async function getAuthToken(forceRefresh = false): Promise<string | null> {
+  const user = await waitForCurrentUser(forceRefresh ? 7000 : 5000);
   if (!user) return null;
-  return await user.getIdToken(true);
+
+  try {
+    return await user.getIdToken(forceRefresh);
+  } catch {
+    return null;
+  }
 }
 
 export function getUser(): User | null {
