@@ -16,7 +16,15 @@ import {
   deleteWoundImage,
   isAuthStartupError,
 } from "@/lib/wounds";
-import { Plus, Flame, Trophy, Target, ChevronRight, Camera, Trash2 } from "lucide-react";
+import {
+  Plus,
+  Flame,
+  Trophy,
+  Target,
+  ChevronRight,
+  Camera,
+  Trash2,
+} from "lucide-react";
 
 type AchievementItem = {
   id: string;
@@ -35,6 +43,13 @@ type HealingPrediction = {
 type WoundRecord = {
   recorded_at: string;
   area_cm2: number;
+};
+
+type MetricSnapshot = {
+  recorded_at: string;
+  area_cm2: number | null;
+  infection_pct: number | null;
+  redness_pct: number | null;
 };
 
 type ProfileSummary = {
@@ -65,6 +80,27 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function toFiniteNumber(value: unknown): number | null {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function normalizeToPercent(value: unknown): number | null {
+  const n = toFiniteNumber(value);
+  if (n === null) return null;
+
+  if (n <= 1) return clamp(n * 100, 0, 100);
+  return clamp(n, 0, 100);
+}
+
+function extractText(value: unknown): string {
+  return String(value || "").toLowerCase().trim();
+}
+
 function getRecordedAt(item: any): string {
   return (
     item?.timestamp ||
@@ -91,6 +127,224 @@ function getAreaCm2(item: any): number | null {
 
   const value = Number(raw);
   return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function parsePercentFromText(text: string): number | null {
+  if (!text) return null;
+
+  const regexes = [
+    /infection(?:\s+likelihood|\s+risk)?[^0-9]{0,20}(\d{1,3})\s*%/i,
+    /(\d{1,3})\s*%[^.]{0,30}infection/i,
+  ];
+
+  for (const regex of regexes) {
+    const match = text.match(regex);
+    if (match?.[1]) {
+      return clamp(Number(match[1]), 0, 100);
+    }
+  }
+
+  return null;
+}
+
+function levelToPercent(levelText: string): number | null {
+  const text = extractText(levelText);
+  if (!text) return null;
+
+  if (text.includes("high") || text.includes("severe")) return 80;
+  if (text.includes("moderate") || text.includes("medium")) return 55;
+  if (text.includes("low")) return 25;
+
+  return null;
+}
+
+function deriveInfectionPercent(analysis: any): number | null {
+  const healingAssessment = analysis?.healing_assessment || {};
+  const healingInfection = healingAssessment?.infection_risk || {};
+  const directInfection =
+    analysis?.infection_risk ||
+    analysis?.infectionRisk ||
+    analysis?.infection ||
+    {};
+
+  const scoreCandidates = [
+    healingInfection?.score,
+    directInfection?.score,
+    analysis?.infection_score,
+    analysis?.infectionScore,
+  ];
+
+  for (const candidate of scoreCandidates) {
+    const score = normalizeToPercent(candidate);
+    if (score !== null) return score;
+  }
+
+  const levelCandidates = [
+    healingInfection?.level,
+    directInfection?.level,
+    analysis?.infection_level,
+    analysis?.infectionLevel,
+  ];
+
+  for (const candidate of levelCandidates) {
+    const pct = levelToPercent(String(candidate || ""));
+    if (pct !== null) return pct;
+  }
+
+  const textCandidates = [
+    analysis?.overall_assessment,
+    analysis?.assessment?.summary,
+    healingAssessment?.notes,
+    analysis?.recommendations?.follow_up,
+    Array.isArray(healingAssessment?.concerns)
+      ? healingAssessment.concerns.join(" ")
+      : healingAssessment?.concerns,
+  ];
+
+  for (const candidate of textCandidates) {
+    const text = String(candidate || "");
+    const percent = parsePercentFromText(text);
+    if (percent !== null) return percent;
+
+    const pctFromLevel = levelToPercent(text);
+    if (pctFromLevel !== null) return pctFromLevel;
+  }
+
+  const healthIndicators = analysis?.color_analysis?.health_indicators || {};
+  if (healthIndicators.signs_of_infection) return 80;
+
+  const concernsText = extractText(
+    Array.isArray(healingAssessment?.concerns)
+      ? healingAssessment.concerns.join(" ")
+      : healingAssessment?.concerns
+  );
+
+  if (
+    concernsText.includes("infection") ||
+    concernsText.includes("infected") ||
+    concernsText.includes("pus") ||
+    concernsText.includes("drainage") ||
+    concernsText.includes("discharge") ||
+    concernsText.includes("odor") ||
+    concernsText.includes("odour") ||
+    concernsText.includes("warmth") ||
+    concernsText.includes("swelling") ||
+    concernsText.includes("fever") ||
+    concernsText.includes("red streak")
+  ) {
+    return 70;
+  }
+
+  const severity = extractText(healingAssessment?.severity);
+  if (severity === "severe" || severity === "critical") return 75;
+  if (severity === "moderate") return 50;
+  if (severity === "mild") return 20;
+
+  const urgency = extractText(analysis?.assessment?.urgency);
+  if (urgency === "urgent") return 80;
+  if (urgency === "soon") return 55;
+  if (urgency === "home") return 20;
+
+  return null;
+}
+
+function deriveRednessFromPercentages(
+  colorPercentages: Record<string, number> | undefined
+): number | null {
+  if (!colorPercentages) return null;
+
+  let score = 0;
+  let foundRelevant = false;
+
+  for (const [rawKey, rawValue] of Object.entries(colorPercentages)) {
+    const value = normalizeToPercent(rawValue);
+    if (value === null) continue;
+
+    const key = rawKey.toLowerCase().trim();
+
+    if (key.includes("red") || key.includes("erythema")) {
+      score += value * 1.0;
+      foundRelevant = true;
+    } else if (key.includes("inflam") || key.includes("irrit")) {
+      score += value * 0.9;
+      foundRelevant = true;
+    } else if (key.includes("pink")) {
+      score += value * 0.55;
+      foundRelevant = true;
+    }
+  }
+
+  if (!foundRelevant) return null;
+  return clamp(score, 0, 100);
+}
+
+function deriveRednessFromDescription(description: unknown): number | null {
+  const text = String(description || "").toLowerCase().trim();
+  if (!text) return null;
+
+  if (
+    text.includes("severe red") ||
+    text.includes("bright red") ||
+    text.includes("very red")
+  ) {
+    return 85;
+  }
+
+  if (text.includes("inflamed") || text.includes("erythema")) {
+    return 70;
+  }
+
+  if (text.includes("red")) {
+    return 65;
+  }
+
+  if (text.includes("pink")) {
+    return 35;
+  }
+
+  return null;
+}
+
+function deriveRednessPercent(analysis: any): number | null {
+  const colorAnalysis = analysis?.color_analysis || {};
+
+  const direct = normalizeToPercent(colorAnalysis.redness_level);
+  if (direct !== null) return direct;
+
+  const fromPercentages = deriveRednessFromPercentages(
+    colorAnalysis.color_percentages
+  );
+  if (fromPercentages !== null) {
+    let score = fromPercentages;
+
+    if (colorAnalysis.health_indicators?.excessive_redness) {
+      score = Math.max(score, 75);
+    } else if (colorAnalysis.health_indicators?.healthy_pink_present) {
+      score = Math.max(score, 30);
+    }
+
+    return clamp(score, 0, 100);
+  }
+
+  const fromDescription = deriveRednessFromDescription(
+    colorAnalysis.color_description
+  );
+  if (fromDescription !== null) {
+    let score = fromDescription;
+
+    if (colorAnalysis.health_indicators?.excessive_redness) {
+      score = Math.max(score, 75);
+    } else if (colorAnalysis.health_indicators?.healthy_pink_present) {
+      score = Math.max(score, 30);
+    }
+
+    return clamp(score, 0, 100);
+  }
+
+  if (colorAnalysis.health_indicators?.excessive_redness) return 75;
+  if (colorAnalysis.health_indicators?.healthy_pink_present) return 30;
+
+  return null;
 }
 
 function getDisplayImageUrl(item: any): string | null {
@@ -207,6 +461,25 @@ function buildMeasuredRecords(imageItems: any[]): WoundRecord[] {
     );
 }
 
+function buildMetricSnapshots(imageItems: any[]): MetricSnapshot[] {
+  return imageItems
+    .map((item: any) => {
+      const analysis = item?.analysis || {};
+
+      return {
+        recorded_at: getRecordedAt(item),
+        area_cm2: getAreaCm2(item),
+        infection_pct: deriveInfectionPercent(analysis),
+        redness_pct: deriveRednessPercent(analysis),
+      };
+    })
+    .filter((snapshot) => !!snapshot.recorded_at)
+    .sort(
+      (a, b) =>
+        new Date(a.recorded_at).getTime() - new Date(b.recorded_at).getTime()
+    );
+}
+
 function buildProfileDetail(base: ProfileSummary, rawItems: any[]): ProfileDetail {
   const imageItems = normalizeImageItems(rawItems);
   const measuredRecords = buildMeasuredRecords(imageItems);
@@ -283,7 +556,10 @@ export default function Dashboard() {
     }
   }
 
-  async function loadDashboardData(preferredProfileId?: string | null, requestUid?: string | null) {
+  async function loadDashboardData(
+    preferredProfileId?: string | null,
+    requestUid?: string | null
+  ) {
     const seq = ++loadSeqRef.current;
     const targetUid = requestUid ?? authUidRef.current;
 
@@ -411,7 +687,9 @@ export default function Dashboard() {
       return;
     }
 
-    const ok = window.confirm("Delete this uploaded photo from this injury? This cannot be undone.");
+    const ok = window.confirm(
+      "Delete this uploaded photo from this injury? This cannot be undone."
+    );
     if (!ok) return;
 
     try {
@@ -461,12 +739,8 @@ export default function Dashboard() {
     ? `/capture?woundId=${encodeURIComponent(activeProfileId)}`
     : "/capture";
 
-  const trendData = useMemo(() => {
-    const records = selectedProfile?.records ?? [];
-    return [...records].sort(
-      (a, b) =>
-        new Date(a.recorded_at).getTime() - new Date(b.recorded_at).getTime()
-    );
+  const metricSnapshots = useMemo(() => {
+    return buildMetricSnapshots(selectedProfile?.imageItems ?? []);
   }, [selectedProfile]);
 
   const {
@@ -481,7 +755,7 @@ export default function Dashboard() {
     stableTip,
   } = useMemo(() => {
     const imageItems = selectedProfile?.imageItems ?? [];
-    const measuredRecords = trendData;
+    const snapshots = metricSnapshots;
     const totalPhotos = imageItems.length;
 
     if (!imageItems.length) {
@@ -537,7 +811,7 @@ export default function Dashboard() {
     const stableTip =
       tips[(selectedProfile?.id?.length ?? totalPhotos) % tips.length];
 
-    if (measuredRecords.length < 2) {
+    if (snapshots.length < 2) {
       const next = new Date(new Date(lastImageAt).getTime() + 2 * msDay);
       return {
         totalPhotos,
@@ -547,28 +821,85 @@ export default function Dashboard() {
         daysTracked,
         avgIntervalDays,
         insightText:
-          "Photos are saved, but you need at least 2 measured records to show a reliable healing trend.",
+          "Photos are saved, but you need at least 2 records to show a reliable healing trend.",
         nextUploadText: `Suggested next upload: ${next.toLocaleDateString()}`,
         stableTip,
       };
     }
 
-    const first = measuredRecords[0];
-    const last = measuredRecords[measuredRecords.length - 1];
+    const first = snapshots[0];
+    const last = snapshots[snapshots.length - 1];
 
-    const initialArea = Number(first.area_cm2 || 0);
-    const currentArea = Number(last.area_cm2 || 0);
-    const areaReduction = initialArea - currentArea;
+    const components: Array<{ weight: number; change: number }> = [];
+    const insightParts: string[] = [];
 
-    const healedPct = initialArea > 0 ? (areaReduction / initialArea) * 100 : 0;
-    const progressBarPct = Math.max(0, Math.min(100, healedPct));
+    if (
+      first.area_cm2 !== null &&
+      last.area_cm2 !== null &&
+      first.area_cm2 > 0
+    ) {
+      const areaDelta = first.area_cm2 - last.area_cm2;
+      const areaChange = clamp(areaDelta / first.area_cm2, -1, 1);
+      components.push({ weight: 0.5, change: areaChange });
+
+      if (Math.abs(areaDelta) < 0.01) {
+        insightParts.push("size unchanged");
+      } else if (areaDelta > 0) {
+        insightParts.push(`size down ${Math.abs(areaDelta).toFixed(2)} cm²`);
+      } else {
+        insightParts.push(`size up ${Math.abs(areaDelta).toFixed(2)} cm²`);
+      }
+    }
+
+    if (first.infection_pct !== null && last.infection_pct !== null) {
+      const infectionDelta = first.infection_pct - last.infection_pct;
+      const infectionChange = clamp(infectionDelta / 100, -1, 1);
+      components.push({ weight: 0.25, change: infectionChange });
+
+      if (Math.abs(infectionDelta) < 1) {
+        insightParts.push("infection stable");
+      } else if (infectionDelta > 0) {
+        insightParts.push(`infection down ${Math.abs(infectionDelta).toFixed(0)}%`);
+      } else {
+        insightParts.push(`infection up ${Math.abs(infectionDelta).toFixed(0)}%`);
+      }
+    }
+
+    if (first.redness_pct !== null && last.redness_pct !== null) {
+      const rednessDelta = first.redness_pct - last.redness_pct;
+      const rednessChange = clamp(rednessDelta / 100, -1, 1);
+      components.push({ weight: 0.25, change: rednessChange });
+
+      if (Math.abs(rednessDelta) < 1) {
+        insightParts.push("redness stable");
+      } else if (rednessDelta > 0) {
+        insightParts.push(`redness down ${Math.abs(rednessDelta).toFixed(0)}%`);
+      } else {
+        insightParts.push(`redness up ${Math.abs(rednessDelta).toFixed(0)}%`);
+      }
+    }
+
+    const totalWeight = components.reduce((sum, part) => sum + part.weight, 0);
+    const weightedImprovement =
+      totalWeight > 0
+        ? components.reduce((sum, part) => sum + part.change * part.weight, 0) /
+          totalWeight
+        : 0;
+
+    const healedPct = clamp(weightedImprovement * 100, 0, 100);
+    const progressBarPct = healedPct;
 
     const trend =
-      areaReduction > 0 ? "Improving" : areaReduction < 0 ? "Worsening" : "Stable";
+      weightedImprovement > 0.05
+        ? "Improving"
+        : weightedImprovement < -0.05
+        ? "Worsening"
+        : "Stable";
 
-    const insightText = `${trend}. Wound area changed by ${Math.abs(areaReduction).toFixed(
-      1
-    )} cm²`;
+    const insightText =
+      insightParts.length > 0
+        ? `${trend}. ${insightParts.join(", ")}.`
+        : `${trend}. Not enough comparable metrics to calculate a detailed trend.`;
 
     const next = new Date(new Date(lastImageAt).getTime() + 2 * msDay);
 
@@ -583,7 +914,7 @@ export default function Dashboard() {
       nextUploadText: `Suggested next upload: ${next.toLocaleDateString()}`,
       stableTip,
     };
-  }, [selectedProfile, trendData]);
+  }, [selectedProfile, metricSnapshots]);
 
   return (
     <div className="ws-container space-y-6">
@@ -598,7 +929,11 @@ export default function Dashboard() {
         </div>
 
         {activeProfileId && (
-          <Button asChild size="lg" className="gap-2 rounded-xl font-medium shrink-0">
+          <Button
+            asChild
+            size="lg"
+            className="gap-2 rounded-xl font-medium shrink-0"
+          >
             <Link href={captureHref}>
               <Camera className="h-5 w-5" />
               Add photo to {selectedProfileName}
@@ -812,11 +1147,17 @@ export default function Dashboard() {
                             size="sm"
                             className="text-red-600 border-red-200 hover:bg-red-50 hover:text-red-700"
                             onClick={() => void handleDeleteImage(item)}
-                            disabled={deletingImageRef === String(item?.imageId || item?.sk || item?.imageKey || "")}
+                            disabled={
+                              deletingImageRef ===
+                              String(item?.imageId || item?.sk || item?.imageKey || "")
+                            }
                             title="Delete this photo"
                           >
                             <Trash2 className="h-4 w-4" />
-                            {deletingImageRef === String(item?.imageId || item?.sk || item?.imageKey || "") ? "Deleting..." : "Delete"}
+                            {deletingImageRef ===
+                            String(item?.imageId || item?.sk || item?.imageKey || "")
+                              ? "Deleting..."
+                              : "Delete"}
                           </Button>
                         </div>
                       </div>
@@ -994,15 +1335,27 @@ export default function Dashboard() {
         <Button asChild size="default" className="rounded-xl font-medium">
           <Link href={captureHref} className="gap-2">
             <Camera className="h-4 w-4" />
-            {activeProfileId ? `Add photo to ${selectedProfileName}` : "Capture / Upload"}
+            {activeProfileId
+              ? `Add photo to ${selectedProfileName}`
+              : "Capture / Upload"}
           </Link>
         </Button>
 
-        <Button asChild variant="outline" size="default" className="rounded-xl font-medium">
+        <Button
+          asChild
+          variant="outline"
+          size="default"
+          className="rounded-xl font-medium"
+        >
           <Link href="/tips">Tips</Link>
         </Button>
 
-        <Button asChild variant="outline" size="default" className="rounded-xl font-medium">
+        <Button
+          asChild
+          variant="outline"
+          size="default"
+          className="rounded-xl font-medium"
+        >
           <Link href="/profile">Profile</Link>
         </Button>
       </nav>
