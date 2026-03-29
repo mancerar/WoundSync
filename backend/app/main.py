@@ -68,15 +68,11 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-
-        # Capacitor / iOS WebView origins:
+        "http://192.168.86.223:3000",
         "capacitor://localhost",
         "ionic://localhost",
         "http://localhost",
         "http://localhost:8100",
-
-        # Your LAN UI (optional, if you ever run UI on LAN):
-        "http://192.168.86.33:3000",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -669,8 +665,14 @@ dynamodb = boto3.resource(
 
 DYNAMODB_TABLE = os.getenv("DYNAMODB_TABLE", "WoundSyncData").strip() or "WoundSyncData"
 
-# Helper: True only when real AWS credentials + bucket are present
+def _env_true(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
 def _aws_configured() -> bool:
+    # Allow forcing local storage for local dev / iPhone testing
+    if _env_true("FORCE_LOCAL_STORAGE"):
+        return False
+
     return bool(
         os.getenv("AWS_ACCESS_KEY_ID", "").strip()
         and os.getenv("S3_BUCKET", "").strip()
