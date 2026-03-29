@@ -10,7 +10,7 @@ import { auth } from "@/firebase/firebase";
 import {
   onAuthStateChanged,
   setPersistence,
-  browserSessionPersistence,
+  browserLocalPersistence,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   sendPasswordResetEmail,
@@ -60,7 +60,7 @@ export default function AuthProvider({ children }: { children: ReactNode }) {
 
     const init = async () => {
       try {
-        await setPersistence(auth!, browserSessionPersistence);
+        await setPersistence(auth!, browserLocalPersistence);
       } catch (error) {
         console.warn("Could not enable Firebase session persistence:", error);
       }
