@@ -1,4 +1,5 @@
 "use client";
+
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { setUser } from "@/lib/auth";
@@ -9,12 +10,18 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Mail, Lock, User as UserIcon, Eye, EyeOff } from "lucide-react";
 
+const PAGE_TOP_PADDING = "max(calc(env(safe-area-inset-top) + 12px), 56px)";
+const PAGE_BOTTOM_PADDING = "max(calc(env(safe-area-inset-bottom) + 12px), 20px)";
+
 export default function Signup() {
   const [username, setUsername] = useState("");
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
   const [showPw, setShowPw] = useState(false);
-  const [message, setMessage] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
+  const [message, setMessage] = useState<{
+    type: "success" | "error" | "info";
+    text: string;
+  } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const router = useRouter();
   const { signUp, authEnabled } = useAuth();
@@ -62,14 +69,16 @@ export default function Signup() {
         let errorMessage = "Sign up failed";
 
         if (errorCode === "auth/email-already-in-use") {
-          errorMessage = "This email is already registered. Redirecting you to login...";
+          errorMessage =
+            "This email is already registered. Redirecting you to login...";
           setMessage({ type: "info", text: errorMessage });
           router.replace(`/?email=${encodeURIComponent(email)}`);
           return;
         } else if (errorCode === "auth/invalid-email") {
           errorMessage = "Invalid email address.";
         } else if (errorCode === "auth/weak-password") {
-          errorMessage = "Password is too weak. Use at least 8 characters with letters and numbers.";
+          errorMessage =
+            "Password is too weak. Use at least 8 characters with letters and numbers.";
         } else if (err?.message) {
           errorMessage = err.message;
         }
@@ -82,7 +91,26 @@ export default function Signup() {
   }
 
   return (
-    <div className="ws-container">
+    <div
+      className="ws-container"
+      style={{
+        paddingTop: PAGE_TOP_PADDING,
+        paddingBottom: PAGE_BOTTOM_PADDING,
+      }}
+    >
+      <Link
+        href="/"
+        style={{
+          display: "inline-block",
+          color: "#2563eb",
+          textDecoration: "none",
+          fontWeight: 600,
+          marginBottom: 12,
+        }}
+      >
+        ← Back to Login Screen
+      </Link>
+
       <div className="leading-tight">
         <h1 className="text-3xl font-extrabold tracking-tight sm:text-4xl">
           Create account
@@ -98,8 +126,8 @@ export default function Signup() {
             message.type === "success"
               ? "border-emerald-200 bg-emerald-50 text-emerald-800"
               : message.type === "error"
-                ? "border-red-200 bg-red-50 text-red-700"
-                : "border-blue-200 bg-blue-50 text-blue-700"
+              ? "border-red-200 bg-red-50 text-red-700"
+              : "border-blue-200 bg-blue-50 text-blue-700"
           }`}
         >
           {message.text}
@@ -148,7 +176,11 @@ export default function Signup() {
             className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
             onClick={() => setShowPw((s) => !s)}
           >
-            {showPw ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+            {showPw ? (
+              <EyeOff className="h-5 w-5" />
+            ) : (
+              <Eye className="h-5 w-5" />
+            )}
           </button>
         </div>
 
