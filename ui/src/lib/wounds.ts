@@ -202,82 +202,91 @@ export async function processAndUploadWound(file: File, woundId: string) {
 
     const predictData = await predictRes.json();
 
-    try {
-      const uploadUrlRes = await authFetch(
-        `${BACKEND_URL}/wounds/${encodeURIComponent(
-          woundId
-        )}/upload-url?content_type=${encodeURIComponent(file.type || "image/jpeg")}`,
-        {
-          method: "POST",
-        }
-      );
-
-      if (uploadUrlRes.ok) {
-        const { uploadUrl, imageKey } = await uploadUrlRes.json();
-
-        if (imageKey) {
-          if (uploadUrl) {
-            await fetch(uploadUrl, {
-              method: "PUT",
-              headers: {
-                "Content-Type": file.type || "image/jpeg",
-              },
-              body: file,
-            });
-          }
-
-          let analysisToSave = predictData;
-
-          if (!predictData.annotated_image) {
-            try {
-              const imgBase64 = await new Promise<string>((resolve, reject) => {
-                const reader = new FileReader();
-
-                reader.onload = () => {
-                  const result = reader.result as string;
-                  resolve(result.includes(",") ? result.split(",")[1] : result);
-                };
-
-                reader.onerror = reject;
-                reader.readAsDataURL(file);
-              });
-
-              analysisToSave = {
-                ...predictData,
-                annotated_image: imgBase64,
-              };
-            } catch {
-              // ignore
-            }
-          }
-
-          const saveRes = await authFetch(
-            `${BACKEND_URL}/wounds/${encodeURIComponent(woundId)}/images`,
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-              },
-              body: JSON.stringify({
-                imageKey,
-                timestamp: new Date().toISOString(),
-                healingScore: predictData.healing_assessment?.score ?? 0,
-                analysis: analysisToSave,
-              }),
-            }
-          );
-
-          if (!saveRes.ok) {
-            console.warn(
-              "Saving wound image metadata failed:",
-              saveRes.status,
-              await readErrorBody(saveRes)
-            );
-          }
-        }
+    const uploadUrlRes = await authFetch(
+      `${BACKEND_URL}/wounds/${encodeURIComponent(
+        woundId
+      )}/upload-url?content_type=${encodeURIComponent(file.type || "image/jpeg")}`,
+      {
+        method: "POST",
       }
-    } catch {
-      console.warn("Cloud save skipped (S3/DynamoDB not configured)");
+    );
+
+    if (!uploadUrlRes.ok) {
+      throw new Error(
+        `Upload URL failed (${uploadUrlRes.status}): ${await readErrorBody(uploadUrlRes)}`
+      );
+    }
+
+    const { uploadUrl, imageKey } = await uploadUrlRes.json();
+
+    if (!imageKey) {
+      throw new Error("Upload URL response did not include imageKey");
+    }
+
+    if (uploadUrl) {
+      const uploadRes = await fetch(uploadUrl, {
+        method: "PUT",
+        headers: {
+          "Content-Type": file.type || "image/jpeg",
+        },
+        body: file,
+      });
+
+      if (!uploadRes.ok) {
+        throw new Error(`Image upload failed (${uploadRes.status})`);
+      }
+    }
+
+    let analysisToSave = predictData;
+
+    if (!predictData.annotated_image) {
+      try {
+        const imgBase64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+
+          reader.onload = () => {
+            const result = reader.result as string;
+            resolve(result.includes(",") ? result.split(",")[1] : result);
+          };
+
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+
+        analysisToSave = {
+          ...predictData,
+          annotated_image: imgBase64,
+        };
+      } catch {
+        // leave analysis as-is
+      }
+    }
+
+    const saveRes = await authFetch(
+      `${BACKEND_URL}/wounds/${encodeURIComponent(woundId)}/images`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          imageKey,
+          timestamp: new Date().toISOString(),
+          healingScore: predictData.healing_assessment?.score ?? 0,
+          analysis: analysisToSave,
+        }),
+      }
+    );
+
+    if (!saveRes.ok) {
+      throw new Error(
+        `Saving wound image metadata failed (${saveRes.status}): ${await readErrorBody(saveRes)}`
+      );
+    }
+
+    const savedJson = await saveRes.json().catch(() => null);
+    if (savedJson && savedJson.ok === false) {
+      throw new Error(savedJson.error || "Saving wound image metadata failed");
     }
 
     return {

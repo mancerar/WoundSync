@@ -2,6 +2,9 @@
 
 import Link from "next/link";
 
+const PAGE_TOP_PADDING = "max(calc(env(safe-area-inset-top) + 12px), 56px)";
+const PAGE_BOTTOM_PADDING = "max(calc(env(safe-area-inset-bottom) + 12px), 20px)";
+
 export default function Tips() {
   const sections = [
     {
@@ -72,7 +75,13 @@ export default function Tips() {
   ];
 
   return (
-    <div className="ws-container space-y-6 pb-8">
+    <div
+      className="ws-container space-y-6"
+      style={{
+        paddingTop: PAGE_TOP_PADDING,
+        paddingBottom: PAGE_BOTTOM_PADDING,
+      }}
+    >
       <Link
         href="/dashboard"
         style={{

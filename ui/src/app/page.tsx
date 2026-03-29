@@ -10,6 +10,9 @@ import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Mail, Lock, User as UserIcon, Eye, EyeOff } from "lucide-react";
 
+const PAGE_TOP_PADDING = "max(calc(env(safe-area-inset-top) + 12px), 56px)";
+const PAGE_BOTTOM_PADDING = "max(calc(env(safe-area-inset-bottom) + 12px), 20px)";
+
 export default function Login() {
   return (
     <Suspense fallback={<div className="ws-container">Loading...</div>}>
@@ -23,12 +26,21 @@ function LoginContent() {
   const [username, setUsername] = useState("");
   const [pw, setPw] = useState("");
   const [showPw, setShowPw] = useState(false);
-  const [message, setMessage] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
+  const [message, setMessage] = useState<{
+    type: "success" | "error" | "info";
+    text: string;
+  } | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isResetSending, setIsResetSending] = useState(false);
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { user: authUser, loading: authLoading, signIn, resetPassword, authEnabled } = useAuth();
+  const {
+    user: authUser,
+    loading: authLoading,
+    signIn,
+    resetPassword,
+    authEnabled,
+  } = useAuth();
 
   useEffect(() => {
     if (!authEnabled || authLoading) return;
@@ -58,13 +70,19 @@ function LoginContent() {
     }
 
     if (!pw) {
-      setMessage({ type: "error", text: "Please enter your password to continue." });
+      setMessage({
+        type: "error",
+        text: "Please enter your password to continue.",
+      });
       return;
     }
 
     if (!authEnabled) {
       setUser({ email, ...(username ? { username } : {}) });
-      setMessage({ type: "success", text: "Signed in successfully. Redirecting to your dashboard..." });
+      setMessage({
+        type: "success",
+        text: "Signed in successfully. Redirecting to your dashboard...",
+      });
       router.replace("/dashboard");
       return;
     }
@@ -74,7 +92,10 @@ function LoginContent() {
     signIn(email, pw)
       .then(() => {
         setUser({ email, ...(username ? { username } : {}) });
-        setMessage({ type: "success", text: "Welcome back to WoundSync. Redirecting..." });
+        setMessage({
+          type: "success",
+          text: "Welcome back to WoundSync. Redirecting...",
+        });
         router.replace("/dashboard");
       })
       .catch((err) => {
@@ -84,11 +105,13 @@ function LoginContent() {
         if (errorCode === "auth/user-not-found") {
           errorMessage = "Account not found. Please create a new account.";
         } else if (errorCode === "auth/invalid-credential") {
-          errorMessage = "Sign-in failed. Check your email/password, and make sure Email/Password sign-in is enabled in Firebase Authentication.";
+          errorMessage =
+            "Sign-in failed. Check your email/password, and make sure Email/Password sign-in is enabled in Firebase Authentication.";
         } else if (errorCode === "auth/wrong-password") {
           errorMessage = "Incorrect password. Please try again.";
         } else if (errorCode === "auth/invalid-login-credentials") {
-          errorMessage = "Incorrect email or password. If needed, use Forgot Password to reset access.";
+          errorMessage =
+            "Incorrect email or password. If needed, use Forgot Password to reset access.";
         } else if (errorCode === "auth/invalid-email") {
           errorMessage = "Invalid email address.";
         } else if (errorCode === "auth/too-many-requests") {
@@ -109,7 +132,10 @@ function LoginContent() {
     setMessage(null);
 
     if (!targetEmail) {
-      setMessage({ type: "error", text: "Enter your email first, then select Forgot Password." });
+      setMessage({
+        type: "error",
+        text: "Enter your email first, then select Forgot Password.",
+      });
       return;
     }
 
@@ -129,7 +155,8 @@ function LoginContent() {
       if (code === "auth/invalid-email") {
         errorMessage = "Invalid email address.";
       } else if (code === "auth/user-not-found") {
-        errorMessage = "If an account exists for that email, a reset link will be sent.";
+        errorMessage =
+          "If an account exists for that email, a reset link will be sent.";
       } else if (code === "auth/too-many-requests") {
         errorMessage = "Too many attempts. Please try again later.";
       } else if (err instanceof Error && err.message) {
@@ -147,7 +174,13 @@ function LoginContent() {
   }
 
   return (
-    <div className="ws-container">
+    <div
+      className="ws-container"
+      style={{
+        paddingTop: PAGE_TOP_PADDING,
+        paddingBottom: PAGE_BOTTOM_PADDING,
+      }}
+    >
       <div className="flex items-center gap-3">
         <div className="relative h-20 w-20 shrink-0">
           <Image
@@ -175,9 +208,7 @@ function LoginContent() {
         visits.
       </p>
 
-      <h2 className="mt-5 text-xl font-semibold text-slate-800">
-        Log in
-      </h2>
+      <h2 className="mt-5 text-xl font-semibold text-slate-800">Log in</h2>
 
       {message ? (
         <div
@@ -185,8 +216,8 @@ function LoginContent() {
             message.type === "success"
               ? "border-emerald-200 bg-emerald-50 text-emerald-800"
               : message.type === "error"
-                ? "border-red-200 bg-red-50 text-red-700"
-                : "border-blue-200 bg-blue-50 text-blue-700"
+              ? "border-red-200 bg-red-50 text-red-700"
+              : "border-blue-200 bg-blue-50 text-blue-700"
           }`}
         >
           {message.text}
@@ -236,7 +267,11 @@ function LoginContent() {
             className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
             aria-label={showPw ? "Hide password" : "Show password"}
           >
-            {showPw ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+            {showPw ? (
+              <EyeOff className="h-5 w-5" />
+            ) : (
+              <Eye className="h-5 w-5" />
+            )}
           </button>
         </div>
 

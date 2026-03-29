@@ -14,6 +14,9 @@ import {
   reauthenticateWithCredential,
 } from "firebase/auth";
 
+const PAGE_TOP_PADDING = "max(calc(env(safe-area-inset-top) + 12px), 56px)";
+const PAGE_BOTTOM_PADDING = "max(calc(env(safe-area-inset-bottom) + 12px), 20px)";
+
 export default function Profile() {
   const [email, setEmail] = useState<string>("");
   const [username, setUsername] = useState<string>("");
@@ -133,7 +136,13 @@ export default function Profile() {
   }
 
   return (
-    <div className="ws-container space-y-6">
+    <div
+      className="ws-container space-y-6"
+      style={{
+        paddingTop: PAGE_TOP_PADDING,
+        paddingBottom: PAGE_BOTTOM_PADDING,
+      }}
+    >
       <Link
         href="/dashboard"
         style={{

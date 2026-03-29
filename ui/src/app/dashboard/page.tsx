@@ -76,6 +76,9 @@ const BACKEND_URL = (
   process.env.NEXT_PUBLIC_BACKEND_URL || "http://127.0.0.1:8000"
 ).replace(/\/$/, "");
 
+const PAGE_TOP_PADDING = "max(calc(env(safe-area-inset-top) + 12px), 56px)";
+const PAGE_BOTTOM_PADDING = "max(calc(env(safe-area-inset-bottom) + 12px), 20px)";
+
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -395,11 +398,22 @@ function isRealImageRecord(item: any): boolean {
   return hasExplicitImageMarker || hasImageAsset;
 }
 
+function stripGeneratedSuffix(value: string): string {
+  return String(value || "").replace(/-[a-f0-9]{8}$/i, "");
+}
+
+function prettifyWoundName(value: string): string {
+  const cleaned = stripGeneratedSuffix(value).replace(/[-_]+/g, " ").trim();
+  if (!cleaned) return "New wound";
+
+  return cleaned.replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
 function normalizeProfiles(raw: any[]): ProfileSummary[] {
   return (raw || [])
     .map((p: any) => ({
       id: String(p?.id ?? ""),
-      name: String(p?.name ?? p?.id ?? "Untitled"),
+      name: prettifyWoundName(String(p?.name ?? p?.id ?? "Untitled")),
       createdAt: p?.createdAt ?? p?.last_timestamp,
       location: p?.location ?? "",
       record_count:
@@ -917,8 +931,14 @@ export default function Dashboard() {
   }, [selectedProfile, metricSnapshots]);
 
   return (
-    <div className="ws-container space-y-6">
-      <div className="flex items-center justify-between gap-4 flex-wrap">
+    <div
+      className="ws-container space-y-6"
+      style={{
+        paddingTop: PAGE_TOP_PADDING,
+        paddingBottom: PAGE_BOTTOM_PADDING,
+      }}
+    >
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h1 className="text-3xl font-extrabold tracking-tight sm:text-4xl">
             Dashboard
@@ -932,7 +952,7 @@ export default function Dashboard() {
           <Button
             asChild
             size="lg"
-            className="gap-2 rounded-xl font-medium shrink-0"
+            className="w-full sm:w-auto gap-2 rounded-xl font-medium justify-center shrink-0"
           >
             <Link href={captureHref}>
               <Camera className="h-5 w-5" />
