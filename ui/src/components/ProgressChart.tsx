@@ -512,8 +512,8 @@ export function ProgressChart({ profileId }: { profileId: string }) {
         {config.label}
       </div>
 
-      <div className="h-64 w-full" style={{ minHeight: 256, minWidth: 300 }}>
-        <ResponsiveContainer width="100%" height="100%">
+      <div style={{ width: '100%', height: 256 }}>
+        <ResponsiveContainer width="100%" height={256}>
           <LineChart
             data={points}
             margin={{ top: 10, right: 20, bottom: 10, left: 0 }}
