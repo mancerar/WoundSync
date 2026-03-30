@@ -91,6 +91,9 @@ type PredictResponse = {
   // overall assessment section in your UI
   overall_assessment?: string;
 
+  // gemini feedback section in your UI
+  gemini_feedback?: string;
+
   // calibration section in your UI
   calibration?: {
     mode?: string;

@@ -203,29 +203,22 @@ export async function processAndUploadWound(file: File, woundId: string) {
     const predictData = await predictRes.json();
 
     try {
-      const uploadUrlRes = await authFetch(
-        `${BACKEND_URL}/wounds/${encodeURIComponent(
-          woundId
-        )}/upload-url?content_type=${encodeURIComponent(file.type || "image/jpeg")}`,
+      // Use direct upload endpoint instead of presigned URL to avoid CORS issues
+      const uploadFormData = new FormData();
+      uploadFormData.append("image", file);
+
+      const uploadRes = await authFetch(
+        `${BACKEND_URL}/wounds/${encodeURIComponent(woundId)}/upload-direct`,
         {
           method: "POST",
+          body: uploadFormData,
         }
       );
 
-      if (uploadUrlRes.ok) {
-        const { uploadUrl, imageKey } = await uploadUrlRes.json();
+      if (uploadRes.ok) {
+        const { imageKey } = await uploadRes.json();
 
         if (imageKey) {
-          if (uploadUrl) {
-            await fetch(uploadUrl, {
-              method: "PUT",
-              headers: {
-                "Content-Type": file.type || "image/jpeg",
-              },
-              body: file,
-            });
-          }
-
           let analysisToSave = predictData;
 
           if (!predictData.annotated_image) {
@@ -276,8 +269,9 @@ export async function processAndUploadWound(file: File, woundId: string) {
           }
         }
       }
-    } catch {
-      console.warn("Cloud save skipped (S3/DynamoDB not configured)");
+    } catch (err) {
+      console.error("Upload failed:", err);
+      throw new Error(`Upload failed: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     return {

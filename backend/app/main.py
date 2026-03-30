@@ -791,6 +791,42 @@ def generate_upload_url(
         ExpiresIn=300
     )
     return {"uploadUrl": upload_url, "imageKey": key}
+
+@app.post("/wounds/{wound_id}/upload-direct")
+async def upload_image_direct(
+    wound_id: str,
+    image: UploadFile = File(...),
+    uid: str = Depends(require_auth)
+):
+    """
+    Alternative upload endpoint that handles S3 upload server-side to avoid CORS issues.
+    Frontend sends the image file directly to backend, backend uploads to S3.
+    """
+    try:
+        ts = datetime.now(timezone.utc).isoformat()
+        key = f"{uid}/{wound_id}/{ts}.jpg"
+        
+        # Read image data
+        image_data = await image.read()
+        
+        # Local fallback
+        if not _aws_configured():
+            return {"ok": True, "imageKey": f"local:{key}"}
+        
+        # Upload to S3 server-side
+        s3.put_object(
+            Bucket=BUCKET_NAME,
+            Key=key,
+            Body=image_data,
+            ContentType=image.content_type or "image/jpeg"
+        )
+        
+        logger.info(f"✓ Uploaded image to S3: {key}")
+        return {"ok": True, "imageKey": key}
+        
+    except Exception as e:
+        logger.error(f"Direct upload error: {e}")
+        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
     
 @app.post("/wounds/{wound_id}/images")
 def save_wound_metadata(
