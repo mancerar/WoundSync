@@ -5,8 +5,11 @@ const config: CapacitorConfig = {
   appName: 'WoundSync',
   webDir: 'out',
   server: {
-    url: 'http://192.168.86.223:3000',
-    cleartext: true
+    url: 'https://corruptedly-overcured-myong.ngrok-free.dev/',
+    cleartext: false
+  },
+  ios: {
+    overrideUserAgent: 'WoundSyncApp/1.0'
   }
 };
 
