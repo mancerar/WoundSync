@@ -137,6 +137,7 @@ export default function CapturePage() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<PredictResponse | null>(null);
   const [woundName, setWoundName] = useState<string>("");
+  const [photoDate, setPhotoDate] = useState<string>("");
 
   // Follow-Up Chat state
   type ChatMsg = { role: "user" | "assistant"; content: string; model?: string; source?: string };
@@ -211,13 +212,27 @@ export default function CapturePage() {
     setResult(null);
 
     try {
+      // Parse custom date if provided (DD/MM/YYYY format)
+      let customTimestamp: string | undefined;
+      if (photoDate.trim()) {
+        const parts = photoDate.trim().split('/');
+        if (parts.length === 3) {
+          const [day, month, year] = parts;
+          // Create date at noon local time to avoid timezone issues
+          const parsedDate = new Date(parseInt(year), parseInt(month) - 1, parseInt(day), 12, 0, 0);
+          if (!isNaN(parsedDate.getTime())) {
+            customTimestamp = parsedDate.toISOString();
+          }
+        }
+      }
+
       // If no woundId in the URL, create a new wound profile with the typed name first
       let targetWoundId = woundId;
       if (!targetWoundId) {
         const name = woundName.trim() || "My Wound";
         targetWoundId = await createWoundProfile(name);
       }
-      const { analysis } = await processAndUploadWound(file, targetWoundId);
+      const { analysis } = await processAndUploadWound(file, targetWoundId, customTimestamp);
       setResult(analysis as any);
     } catch (e: any) {
       const msg = e?.message || "Request failed";
@@ -310,6 +325,31 @@ export default function CapturePage() {
           </span>
         </div>
       )}
+
+      {/* Photo date input */}
+      <div style={{ marginBottom: 16, display: "flex", alignItems: "center", gap: 10 }}>
+        <label style={{ fontWeight: 600, color: "#333", whiteSpace: "nowrap" }}>
+          Photo taken on:
+        </label>
+        <input
+          suppressHydrationWarning
+          type="text"
+          placeholder="DD/MM/YYYY"
+          value={photoDate}
+          onChange={(e) => setPhotoDate(e.target.value)}
+          style={{
+            padding: "8px 12px",
+            borderRadius: 8,
+            border: "1px solid #bbb",
+            fontSize: 14,
+            width: 150,
+          }}
+        />
+        <span style={{ fontSize: 12, color: "#888" }}>
+          (DD/MM/YYYY) - optional, defaults to today
+        </span>
+      </div>
+
       {/* old description removed */}
       <div style={{ display: "none" }}>
         Upload a photo. Guidance is based on shape + visual cues (not “size in

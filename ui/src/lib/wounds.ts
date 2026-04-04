@@ -178,7 +178,7 @@ export async function predictOnly(file: File): Promise<any> {
   }
 }
 
-export async function processAndUploadWound(file: File, woundId: string) {
+export async function processAndUploadWound(file: File, woundId: string, customTimestamp?: string) {
   const formData = new FormData();
   formData.append("image", file);
 
@@ -244,6 +244,8 @@ export async function processAndUploadWound(file: File, woundId: string) {
             }
           }
 
+          const timestamp = customTimestamp || new Date().toISOString();
+
           const saveRes = await authFetch(
             `${BACKEND_URL}/wounds/${encodeURIComponent(woundId)}/images`,
             {
@@ -253,7 +255,7 @@ export async function processAndUploadWound(file: File, woundId: string) {
               },
               body: JSON.stringify({
                 imageKey,
-                timestamp: new Date().toISOString(),
+                timestamp: timestamp,
                 healingScore: predictData.healing_assessment?.score ?? 0,
                 analysis: analysisToSave,
               }),

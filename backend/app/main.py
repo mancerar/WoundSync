@@ -927,8 +927,63 @@ def create_wound_profile(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def calculate_wound_streak(images: list) -> int:
+    """
+    Calculate current photo upload streak based on image timestamps.
+    Counts consecutive UNIQUE days with at least one photo.
+    Allows up to 3 days gap between uploads to maintain streak.
+    """
+    logger.info(f"=== STREAK CALCULATION START ===")
+    logger.info(f"Input images count: {len(images)}")
+    
+    if not images:
+        logger.info("No images, returning streak=0")
+        return 0
+    
+    # Extract unique dates from all images
+    unique_dates = set()
+    for img in images:
+        ts = img.get("timestamp")
+        if ts:
+            try:
+                date = datetime.fromisoformat(ts.replace('Z', '+00:00')).date()
+                unique_dates.add(date)
+            except (ValueError, AttributeError) as e:
+                logger.warning(f"Failed to parse timestamp {ts}: {e}")
+    
+    if not unique_dates:
+        logger.info("No valid dates found, returning streak=0")
+        return 0
+    
+    # Sort dates (most recent first)
+    sorted_dates = sorted(unique_dates, reverse=True)
+    logger.info(f"Unique dates found: {sorted_dates}")
+    
+    streak = 1
+    
+    for i in range(len(sorted_dates) - 1):
+        current_date = sorted_dates[i]
+        previous_date = sorted_dates[i + 1]
+        
+        days_diff = (current_date - previous_date).days
+        
+        logger.info(f"Streak calc: {current_date} vs {previous_date}, diff={days_diff} days")
+        
+        # Allow up to 3 days between uploads to maintain streak
+        if days_diff <= 3:
+            streak += 1
+            logger.info(f"Streak continues, now={streak}")
+        else:
+            logger.info(f"Gap too large ({days_diff} days), breaking streak")
+            break
+    
+    logger.info(f"=== FINAL STREAK: {streak} (from {len(unique_dates)} unique days, {len(images)} total images) ===")
+    return streak
+
+
 @app.get("/wounds")
 def list_user_wounds(uid: str = Depends(require_auth)):
+    logger.info(f"========== /wounds endpoint called for user: {uid} ==========")
     # ── Local SQLite fallback ──────────────────────────────────────────────
     if not _aws_configured():
         try:
@@ -942,12 +997,15 @@ def list_user_wounds(uid: str = Depends(require_auth)):
                     "image_count": 0,
                     "last_timestamp": w.timestamp,
                     "last_imageKey": None,
+                    "images": [],  # Track images for streak calculation
                 }
             # Augment with image counts
             local_images = db.query(LocalWoundImage).filter_by(user_id=uid).all()
             for img in local_images:
                 if img.wound_id in wounds:
                     wounds[img.wound_id]["image_count"] += 1
+                    wounds[img.wound_id]["images"].append({"timestamp": img.timestamp})
+                    logger.info(f"Added image for {img.wound_id}: timestamp={img.timestamp}")
                     if not wounds[img.wound_id]["last_timestamp"] or img.timestamp > wounds[img.wound_id]["last_timestamp"]:
                         wounds[img.wound_id]["last_timestamp"] = img.timestamp
                         wounds[img.wound_id]["last_imageKey"] = img.image_id
@@ -959,7 +1017,14 @@ def list_user_wounds(uid: str = Depends(require_auth)):
                         "image_count": 1,
                         "last_timestamp": img.timestamp,
                         "last_imageKey": img.image_id,
+                        "images": [{"timestamp": img.timestamp}],
                     }
+            
+            # Calculate streak for each wound
+            for wound in wounds.values():
+                wound["streak"] = calculate_wound_streak(wound["images"])
+                del wound["images"]  # Remove temporary images list
+            
             db.close()
             return {"ok": True, "wounds": list(wounds.values())}
         except Exception as e:
@@ -999,9 +1064,18 @@ def list_user_wounds(uid: str = Depends(require_auth)):
             sk = it.get("sk") or ""
             if not wid:
                 continue
-            entry = wounds.setdefault(wid, {"id": wid, "name": wid, "image_count": 0, "last_timestamp": None, "last_imageKey": None})
+            entry = wounds.setdefault(wid, {
+                "id": wid,
+                "name": wid,
+                "image_count": 0,
+                "last_timestamp": None,
+                "last_imageKey": None,
+                "images": []  # Track images for streak calculation
+            })
             if "#IMG#" in sk or it.get("imageKey"):
                 entry["image_count"] += 1
+                entry["images"].append({"timestamp": ts})
+                logger.info(f"DynamoDB: Added image for {wid}: timestamp={ts}")
                 if ts and (entry["last_timestamp"] is None or ts > entry["last_timestamp"]):
                     entry["last_timestamp"] = ts
                     entry["last_imageKey"] = it.get("imageKey")
@@ -1010,6 +1084,13 @@ def list_user_wounds(uid: str = Depends(require_auth)):
                     entry["name"] = it["name"]
                 if entry["last_timestamp"] is None and ts:
                     entry["last_timestamp"] = ts
+        
+        # Calculate streak for each wound
+        for wound in wounds.values():
+            logger.info(f"Calculating streak for wound {wound['id']}: {len(wound['images'])} images")
+            wound["streak"] = calculate_wound_streak(wound["images"])
+            del wound["images"]  # Remove temporary images list
+        
         return {"ok": True, "wounds": list(wounds.values())}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

@@ -602,7 +602,7 @@ export default function Dashboard() {
           createdAt: d.last_timestamp,
           location: "",
           record_count: d.image_count,
-          streak: 0,
+          streak: d.streak ?? 0,
           achievement_count: 0,
         }))
       );
@@ -725,7 +725,9 @@ export default function Dashboard() {
 
   const selectedProfile = useMemo(() => {
     if (!selectedProfileId) return null;
-    return detailsById[selectedProfileId] ?? null;
+    const profile = detailsById[selectedProfileId] ?? null;
+    console.log("Selected profile data:", profile);
+    return profile;
   }, [detailsById, selectedProfileId]);
 
   const activeProfileId = selectedProfileId;
@@ -1306,9 +1308,20 @@ export default function Dashboard() {
                 </div>
                 <div>
                   <div className="text-xl font-semibold text-slate-900">
-                    {daysTracked}
+                    {(() => {
+                      console.log("Streak value:", selectedProfile.streak, "Type:", typeof selectedProfile.streak);
+                      return selectedProfile.streak && selectedProfile.streak > 1 ? (
+                        <span className="flex items-center justify-center gap-1">
+                          🔥 {selectedProfile.streak}
+                        </span>
+                      ) : (
+                        daysTracked
+                      );
+                    })()}
                   </div>
-                  <div className="text-xs text-slate-600">days</div>
+                  <div className="text-xs text-slate-600">
+                    {selectedProfile.streak && selectedProfile.streak > 1 ? "day streak" : "days"}
+                  </div>
                 </div>
                 <div>
                   <div className="text-xl font-semibold text-slate-900">
