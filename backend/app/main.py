@@ -70,7 +70,7 @@ app.add_middleware(
         "http://127.0.0.1:3000",
         "https://wound-sync.org",
         "https://www.wound-sync.org",
-
+        
         # Capacitor / iOS WebView origins:
         "capacitor://localhost",
         "ionic://localhost",
@@ -80,6 +80,8 @@ app.add_middleware(
         # Your LAN UI (optional, if you ever run UI on LAN):
         "http://192.168.86.33:3000",
     ],
+    # Adding regex to allow any vercel preview URL just in case
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
